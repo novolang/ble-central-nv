@@ -1,0 +1,23 @@
+[package]
+name        = "ble-central-nv"
+version     = "0.1.0"
+description = "The Central role of Bluetooth LE at the level of GATT operations, as a trait with an event stream: scan, connect, discover, read, write, subscribe, a maximum write length and advisory connection parameters, over an opaque peer id, with the session helpers every service client shares, a scripted implementation that models a peripheral, and a conformance suite any implementation runs.  Holds no stack: a phone's operating system, the noble Host and a test double are the implementations."
+license     = "Apache-2.0"
+stability   = "experimental"
+
+# `host`: the helpers call an implementation of the trait, which reaches a radio, so they leave the `core` budget; the implementation's own effect
+# is the trait's parameter and the package adds none of its own beyond `mutate`.
+layer       = "host"
+category    = "networking"
+tags        = ["bluetooth", "ble", "gatt", "central", "mobile", "trait"]
+repository  = "https://github.com/novolang/ble-central-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.26.0"
+
+# A library: no `main`, so `novo pkg build` type-checks and effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "The Bluetooth LE Central as a trait, over any stack"
+
+[dependencies]
+# None.  `std` is the only import.

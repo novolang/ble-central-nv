@@ -1,0 +1,411 @@
+// session_tests: the waits of src/session.nv against the scripted peripheral.
+//
+//   novo test tests/session_tests.nv
+
+use std.test
+use central
+use faulty
+use scripted
+use session
+
+fn bytes3() -> [u8]
+    let v: [u8] = [1, 2, 3]
+    v
+
+fn nothing() -> [u8]
+    let v: [u8] = []
+    v
+
+// One device with the Heart Rate service: a notifying characteristic (index 0), a readable one (1) and a writable one (2).
+fn world() -> Scripted [mutate]
+    let dev = scripted.scripted()
+    dev.add_device("AA:01", "Sensor")
+    dev.add_service(central.uuid16(0x180D), [scripted.char_spec(central.uuid16(0x2A37), PROP_NOTIFY, nothing()),
+        scripted.char_spec(central.uuid16(0x2A38), PROP_READ, bytes3()),
+        scripted.char_spec(central.uuid16(0x2A39), PROP_WRITE, nothing())])
+    dev
+
+fn sensor() -> PeerId
+    central.peer("AA:01")
+
+fn opts() -> ConnectOptions
+    ConnectOptions { timeout_ms: 1000, security: Security.Unsecured }
+
+// A connected link on `dev`.
+fn linked(dev: Scripted, p: Pump) -> LinkId [mutate, time]
+    match session.connect_wait(dev, p, sensor(), opts())
+        Ok(l)  => l
+        Err(_) => LinkId { id: 0 - 1 }
+
+fn chr(link: LinkId, idx: Int) -> CharRef
+    CharRef { link: link.id, idx: idx }
+
+@test
+fn test_a_connection_is_waited_for() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    match session.connect_wait(dev, p, sensor(), opts())
+        Ok(l)  => test.assert_eq(l.id, 1)
+        Err(_) => test.assert(false)
+
+@test
+fn test_a_connection_to_nobody_is_refused() [mutate, time]
+    let dev = world()
+    match session.connect_wait(dev, session.pump(), central.peer("ZZ"), opts())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_NOT_FOUND)
+
+@test
+fn test_a_connection_that_never_completes_is_ended() [mutate, time]
+    let dev = world()
+    dev.silence("connect")
+    match session.connect_wait(dev, session.pump(), sensor(), opts())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_TIMEOUT)
+    test.assert(list.len(dev.calls()) == 2)
+
+@test
+fn test_a_connection_that_fails_carries_the_gatt_status() [mutate, time]
+    let dev = world()
+    dev.silence("connect")
+    dev.push(Connected(LinkId { id: 1 }, sensor(), 62))
+    match session.connect_wait(dev, session.pump(), sensor(), opts())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_GATT + 62)
+
+@test
+fn test_a_link_that_ends_during_the_connection_ends_the_wait() [mutate, time]
+    let dev = world()
+    dev.silence("connect")
+    dev.push(Disconnected(LinkId { id: 1 }, 8))
+    match session.connect_wait(dev, session.pump(), sensor(), opts())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_NOT_CONNECTED)
+
+@test
+fn test_services_are_found_after_the_discovery() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    test.assert(session.discover_wait(dev, p, link, 1000) == None)
+    match session.find_service(dev, link, central.uuid16(0x180D))
+        Some(s) => test.assert_eq(list.len(s.chars), 3)
+        None    => test.assert(false)
+    test.assert(session.find_service(dev, link, central.uuid16(0x180F)) == None)
+    match session.find_char(dev, link, central.uuid16(0x180D), central.uuid16(0x2A38))
+        Some(c) =>
+            test.assert_eq(c.ref.idx, 1)
+            test.assert_eq(c.ref.link, link.id)
+            test.assert_eq(c.props, PROP_READ)
+        None    => test.assert(false)
+    test.assert(session.find_char(dev, link, central.uuid16(0x180D), central.uuid16(0x2A99)) == None)
+    test.assert(session.find_char(dev, link, central.uuid16(0x180F), central.uuid16(0x2A38)) == None)
+
+@test
+fn test_a_discovery_that_fails_says_why() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    dev.refuse("discover", 77)
+    match session.discover_wait(dev, p, link, 1000)
+        Some(e) => test.assert_eq(e.code, 77)
+        None    => test.assert(false)
+    dev.silence("discover")
+    match session.discover_wait(dev, p, link, 1000)
+        Some(e) => test.assert_eq(e.code, E_TIMEOUT)
+        None    => test.assert(false)
+    dev.silence("discover")
+    dev.push(Discovered(link, 3))
+    match session.discover_wait(dev, p, link, 1000)
+        Some(e) => test.assert_eq(e.code, E_GATT + 3)
+        None    => test.assert(false)
+    dev.silence("discover")
+    dev.push(Disconnected(link, 8))
+    match session.discover_wait(dev, p, link, 1000)
+        Some(e) => test.assert_eq(e.code, E_NOT_CONNECTED)
+        None    => test.assert(false)
+
+@test
+fn test_a_read_returns_the_value() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    match session.read_wait(dev, p, link, chr(link, 1), 1000)
+        Ok(v)  => test.assert_eq(list.len(v), 3)
+        Err(_) => test.assert(false)
+
+@test
+fn test_a_read_that_fails_says_why() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    dev.refuse("read", 55)
+    match session.read_wait(dev, p, link, chr(link, 1), 1000)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, 55)
+    dev.silence("read")
+    dev.push(ReadDone(link, chr(link, 1), 5, nothing()))
+    match session.read_wait(dev, p, link, chr(link, 1), 1000)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_GATT + 5)
+    dev.silence("read")
+    match session.read_wait(dev, p, link, chr(link, 1), 1000)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_TIMEOUT)
+
+@test
+fn test_a_write_is_waited_for_and_stored() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    test.assert(session.write_wait(dev, p, link, chr(link, 2), bytes3(), true, 1000) == None)
+    test.assert_eq(list.len(dev.value_of(2)), 3)
+
+@test
+fn test_a_write_that_fails_says_why() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    dev.refuse("write", 44)
+    match session.write_wait(dev, p, link, chr(link, 2), bytes3(), true, 1000)
+        Some(e) => test.assert_eq(e.code, 44)
+        None    => test.assert(false)
+    dev.silence("write")
+    dev.push(WriteDone(link, chr(link, 2), 13))
+    match session.write_wait(dev, p, link, chr(link, 2), bytes3(), false, 1000)
+        Some(e) => test.assert_eq(e.code, E_GATT + 13)
+        None    => test.assert(false)
+    dev.silence("write")
+    match session.write_wait(dev, p, link, chr(link, 2), bytes3(), false, 1000)
+        Some(e) => test.assert_eq(e.code, E_TIMEOUT)
+        None    => test.assert(false)
+
+@test
+fn test_a_long_write_goes_in_pieces_of_max_write() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    test.assert_eq(dev.max_write(link, false), 20)
+    var big: [u8] = []
+    for i in 0..45
+        list.push(big, i as u8)
+    test.assert(session.write_all(dev, p, link, chr(link, 2), big, true, 1000) == None)
+    var writes = 0
+    for c in dev.calls()
+        if str.starts_with(c, "write")
+            writes = writes + 1
+    test.assert_eq(writes, 3)
+    test.assert_eq(list.len(dev.value_of(2)), 5)
+
+@test
+fn test_a_write_of_nothing_sends_nothing_and_a_failed_piece_stops_the_rest() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    test.assert(session.write_all(dev, p, link, chr(link, 2), nothing(), true, 1000) == None)
+    var big: [u8] = []
+    for i in 0..45
+        list.push(big, i as u8)
+    dev.silence("write")
+    match session.write_all(dev, p, link, chr(link, 2), big, true, 1000)
+        Some(e) => test.assert_eq(e.code, E_TIMEOUT)
+        None    => test.assert(false)
+
+@test
+fn test_a_link_that_takes_no_write_refuses_write_all() [mutate, time]
+    let dev = faulty.faulty(world())
+    dev.set_max_write(0)
+    let p = session.pump()
+    let link = LinkId { id: 1 }
+    match session.write_all(dev, p, link, chr(link, 2), bytes3(), true, 1000)
+        Some(e) => test.assert_eq(e.code, E_UNSUPPORTED)
+        None    => test.assert(false)
+
+@test
+fn test_a_subscription_and_its_notifications() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    test.assert(session.subscribe_wait(dev, p, link, chr(link, 0), SubMode.Notify, 1000) == None)
+    test.assert_eq(dev.sub_of(0), 1)
+    dev.push(Notified(link, chr(link, 0), bytes3()))
+    match session.notification(dev, p, link, chr(link, 0), 1000)
+        Ok(v)  => test.assert_eq(list.len(v), 3)
+        Err(_) => test.assert(false)
+    match session.notification(dev, p, link, chr(link, 0), 1000)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_TIMEOUT)
+    dev.push(Disconnected(link, 8))
+    match session.notification(dev, p, link, chr(link, 0), 1000)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_NOT_CONNECTED)
+
+@test
+fn test_a_subscription_that_fails_says_why() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    dev.refuse("subscribe", 33)
+    match session.subscribe_wait(dev, p, link, chr(link, 0), SubMode.Notify, 1000)
+        Some(e) => test.assert_eq(e.code, 33)
+        None    => test.assert(false)
+    dev.silence("subscribe")
+    dev.push(SubscribeDone(link, chr(link, 0), 15))
+    match session.subscribe_wait(dev, p, link, chr(link, 0), SubMode.Indicate, 1000)
+        Some(e) => test.assert_eq(e.code, E_GATT + 15)
+        None    => test.assert(false)
+    test.assert_eq(dev.sub_of(0), 2)
+    dev.silence("subscribe")
+    match session.subscribe_wait(dev, p, link, chr(link, 0), SubMode.Off, 1000)
+        Some(e) => test.assert_eq(e.code, E_TIMEOUT)
+        None    => test.assert(false)
+    test.assert_eq(dev.sub_of(0), 0)
+    test.assert_eq(dev.sub_of(9), 0)
+
+@test
+fn test_an_event_that_arrives_during_a_wait_is_kept_for_the_next() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    dev.push(Notified(link, chr(link, 0), bytes3()))
+    match session.read_wait(dev, p, link, chr(link, 1), 1000)
+        Ok(_)  => ()
+        Err(_) => test.assert(false)
+    test.assert_eq(session.pump_pending(p), 1)
+    match session.notification(dev, p, link, chr(link, 0), 1000)
+        Ok(v)  => test.assert_eq(list.len(v), 3)
+        Err(_) => test.assert(false)
+    test.assert_eq(session.pump_pending(p), 0)
+
+@test
+fn test_the_pump_keeps_a_bounded_number_of_events() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    for _i in 0..300
+        dev.push(Notified(link, chr(link, 0), bytes3()))
+    test.assert(session.await_event(dev, p, T_MTU, link.id, 0 - 1, 1000) == None)
+    test.assert_eq(session.pump_pending(p), BACKLOG_MAX)
+    test.assert_eq(session.pump_lost(p), 44)
+
+@test
+fn test_the_mtu_is_asked_for_and_the_answer_returned() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    match session.mtu_wait(dev, p, link, 517, 1000)
+        Ok(m)  => test.assert_eq(m, 247)
+        Err(_) => test.assert(false)
+    test.assert_eq(dev.max_write(link, true), 244)
+    dev.refuse("request_mtu", 22)
+    match session.mtu_wait(dev, p, link, 100, 1000)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, 22)
+    dev.silence("request_mtu")
+    dev.push(MtuChanged(link, 23, 6))
+    match session.mtu_wait(dev, p, link, 100, 1000)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_GATT + 6)
+    dev.silence("request_mtu")
+    match session.mtu_wait(dev, p, link, 100, 1000)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_TIMEOUT)
+
+@test
+fn test_open_link_connects_discovers_and_asks_for_the_mtu() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    match session.open_link(dev, p, sensor(), opts(), 247)
+        Ok(link) =>
+            test.assert_eq(dev.max_write(link, true), 244)
+            test.assert_eq(list.len(dev.services(link)), 1)
+        Err(_)   => test.assert(false)
+    let low = world()
+    match session.open_link(low, session.pump(), sensor(), opts(), 23)
+        Ok(link) => test.assert_eq(low.max_write(link, true), 20)
+        Err(_)   => test.assert(false)
+
+@test
+fn test_open_link_gives_up_at_the_step_that_fails_and_ends_the_link() [mutate, time]
+    let nobody = world()
+    match session.open_link(nobody, session.pump(), central.peer("ZZ"), opts(), 247)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_NOT_FOUND)
+    let nodisc = world()
+    nodisc.silence("discover")
+    match session.open_link(nodisc, session.pump(), sensor(), opts(), 247)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_TIMEOUT)
+    test.assert(list.len(nodisc.calls()) == 3)
+    let nomtu = world()
+    nomtu.silence("request_mtu")
+    match session.open_link(nomtu, session.pump(), sensor(), opts(), 247)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_TIMEOUT)
+
+@test
+fn test_every_event_has_its_tag_link_characteristic_and_status() [mutate]
+    let link = LinkId { id: 4 }
+    let ch = CharRef { link: 4, idx: 6 }
+    let events = [AdapterChanged(AdapterState.On),
+        ScanResult(central.peer("A"), 0 - 50, "n", nothing()),
+        ScanFailed(2),
+        Connected(link, central.peer("A"), 1),
+        Disconnected(link, 2),
+        Discovered(link, 3),
+        ReadDone(link, ch, 4, nothing()),
+        WriteDone(link, ch, 5),
+        SubscribeDone(link, ch, 6),
+        Notified(link, ch, nothing()),
+        MtuChanged(link, 100, 7),
+        PriorityChanged(link, 8),
+        ServicesChanged(link),
+        BondChanged(link, true),
+        Dropped(9)]
+    var seen: [Int] = []
+    for e in events
+        list.push(seen, session.tag(e))
+    for i in 0..15
+        test.assert_eq(seen[i], i + 1)
+    test.assert_eq(session.link_of(events[3]), 4)
+    test.assert_eq(session.link_of(events[14]), 0 - 1)
+    test.assert_eq(session.link_of(events[0]), 0 - 1)
+    for i in 3..14
+        test.assert_eq(session.link_of(events[i]), 4)
+    test.assert_eq(session.char_of(events[6]), 6)
+    test.assert_eq(session.char_of(events[9]), 6)
+    test.assert_eq(session.char_of(events[10]), 0 - 1)
+    test.assert_eq(session.status_of(events[3]), 1)
+    test.assert_eq(session.status_of(events[5]), 3)
+    test.assert_eq(session.status_of(events[6]), 4)
+    test.assert_eq(session.status_of(events[7]), 5)
+    test.assert_eq(session.status_of(events[8]), 6)
+    test.assert_eq(session.status_of(events[10]), 7)
+    test.assert_eq(session.status_of(events[11]), 8)
+    test.assert_eq(session.status_of(events[14]), 0)
+
+@test
+fn test_a_wait_is_for_its_link_and_its_characteristic_only() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    let other = LinkId { id: 2 }
+    dev.push(Notified(other, chr(other, 0), bytes3()))
+    dev.push(Notified(link, chr(link, 1), bytes3()))
+    test.assert(session.await_event(dev, p, T_NOTIFIED, link.id, 0, 1000) == None)
+    test.assert_eq(session.pump_pending(p), 2)
+    match session.await_event(dev, p, T_NOTIFIED, other.id, 0 - 1, 1000)
+        Some(e) => test.assert_eq(session.link_of(e), 2)
+        None    => test.assert(false)
+    match session.await_event(dev, p, T_NOTIFIED, 0 - 1, 1, 1000)
+        Some(e) => test.assert_eq(session.char_of(e), 1)
+        None    => test.assert(false)
+
+@test
+fn test_a_wait_with_no_time_looks_in_the_pump_and_nowhere_else() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    let link = linked(dev, p)
+    dev.push(Notified(link, chr(link, 0), bytes3()))
+    test.assert(session.await_event(dev, p, T_NOTIFIED, link.id, 0, 0) == None)
+    test.assert_eq(dev.queued(), 1)

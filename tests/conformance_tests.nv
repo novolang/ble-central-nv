@@ -1,0 +1,170 @@
+// conformance_tests: the suite of src/conformance.nv passes a faithful implementation and finds each defect of a faulty one.
+//
+//   novo test tests/conformance_tests.nv
+
+use std.test
+use central
+use conformance
+use faulty
+use scripted
+
+fn bytes3() -> [u8]
+    let v: [u8] = [1, 2, 3]
+    v
+
+fn nothing() -> [u8]
+    let v: [u8] = []
+    v
+
+fn world() -> Scripted [mutate]
+    let dev = scripted.scripted()
+    dev.add_device("AA:01", "Sensor")
+    dev.add_service(central.uuid16(0x180D), [scripted.char_spec(central.uuid16(0x2A37), PROP_NOTIFY, nothing()),
+        scripted.char_spec(central.uuid16(0x2A38), PROP_READ, bytes3()),
+        scripted.char_spec(central.uuid16(0x2A39), PROP_WRITE, nothing())])
+    dev
+
+fn plan() -> Plan
+    Plan { service: central.uuid16(0x180D),
+        read_char: central.uuid16(0x2A38),
+        write_char: Some(central.uuid16(0x2A39)),
+        write_value: bytes3(),
+        notify_char: Some(central.uuid16(0x2A37)) }
+
+fn bare_plan() -> Plan
+    Plan { service: central.uuid16(0x180D),
+        read_char: central.uuid16(0x2A38),
+        write_char: None,
+        write_value: nothing(),
+        notify_char: None }
+
+fn sensor() -> PeerId
+    central.peer("AA:01")
+
+// Whether some failure text contains `part`.
+fn mentions(failed: [Str], part: Str) -> Bool
+    for f in failed
+        if str.contains(f, part)
+            return true
+    false
+
+@test
+fn test_a_faithful_implementation_passes() [mutate, time]
+    let failed = conformance.run(world(), sensor(), plan(), 1000)
+    test.assert_eq(list.len(failed), 0)
+
+@test
+fn test_a_plan_without_a_write_or_notify_characteristic_skips_them() [mutate, time]
+    let failed = conformance.run(world(), sensor(), bare_plan(), 1000)
+    test.assert_eq(list.len(failed), 0)
+
+@test
+fn test_an_adapter_that_is_off_is_the_only_failure_reported() [mutate, time]
+    let dev = world()
+    dev.set_adapter(AdapterState.Off)
+    let failed = conformance.run(dev, sensor(), plan(), 1000)
+    test.assert_eq(list.len(failed), 1)
+    test.assert(mentions(failed, "adapter"))
+
+@test
+fn test_a_device_that_cannot_be_opened_is_reported() [mutate, time]
+    let failed = conformance.run(world(), central.peer("ZZ"), plan(), 1000)
+    test.assert(mentions(failed, "open_link"))
+
+@test
+fn test_characteristics_the_plan_names_must_be_on_the_device() [mutate, time]
+    let missing_read = Plan { service: central.uuid16(0x180D),
+        read_char: central.uuid16(0x2A99),
+        write_char: None,
+        write_value: nothing(),
+        notify_char: None }
+    test.assert(mentions(conformance.run(world(), sensor(), missing_read, 1000), "read characteristic"))
+    let missing_write = Plan { service: central.uuid16(0x180D),
+        read_char: central.uuid16(0x2A38),
+        write_char: Some(central.uuid16(0x2A99)),
+        write_value: nothing(),
+        notify_char: None }
+    test.assert(mentions(conformance.run(world(), sensor(), missing_write, 1000), "write characteristic"))
+    let missing_notify = Plan { service: central.uuid16(0x180D),
+        read_char: central.uuid16(0x2A38),
+        write_char: None,
+        write_value: nothing(),
+        notify_char: Some(central.uuid16(0x2A99)) }
+    test.assert(mentions(conformance.run(world(), sensor(), missing_notify, 1000), "notify characteristic"))
+
+@test
+fn test_reads_that_never_complete_are_reported() [mutate, time]
+    let dev = world()
+    dev.silence("read")
+    dev.silence("read")
+    let first = conformance.run(dev, sensor(), plan(), 1000)
+    test.assert(mentions(first, "first of two reads"))
+    let both = world()
+    both.refuse("read", 9)
+    test.assert(mentions(conformance.run(both, sensor(), plan(), 1000), "a read was refused"))
+
+@test
+fn test_a_second_read_that_differs_or_fails_is_reported() [mutate, time]
+    let dev = world()
+    dev.silence("read")
+    dev.silence("read")
+    dev.push(ReadDone(LinkId { id: 1 }, CharRef { link: 1, idx: 1 }, 0, bytes3()))
+    test.assert(mentions(conformance.run(dev, sensor(), plan(), 1000), "second of two reads"))
+    let failing = world()
+    failing.silence("read")
+    failing.silence("read")
+    failing.push(ReadDone(LinkId { id: 1 }, CharRef { link: 1, idx: 1 }, 5, bytes3()))
+    failing.push(ReadDone(LinkId { id: 1 }, CharRef { link: 1, idx: 1 }, 0, nothing()))
+    let failed = conformance.run(failing, sensor(), plan(), 1000)
+    test.assert(mentions(failed, "first read ended with the status 5"))
+    test.assert(mentions(failed, "second read differs"))
+
+@test
+fn test_a_write_or_a_subscription_that_fails_is_reported() [mutate, time]
+    let w = world()
+    w.refuse("write", 31)
+    test.assert(mentions(conformance.run(w, sensor(), plan(), 1000), "write_all"))
+    let s = world()
+    s.refuse("subscribe", 32)
+    test.assert(mentions(conformance.run(s, sensor(), plan(), 1000), "subscribe_wait"))
+
+@test
+fn test_priority_that_is_advertised_and_refused_is_reported() [mutate, time]
+    let dev = world()
+    dev.refuse("priority", 40)
+    test.assert(mentions(conformance.run(dev, sensor(), plan(), 1000), "priority is advertised"))
+
+@test
+fn test_a_disconnect_that_is_not_reported_is_found() [mutate, time]
+    let dev = faulty.faulty(world())
+    dev.mute_disconnect()
+    test.assert(mentions(conformance.run(dev, sensor(), plan(), 1000), "not followed by Disconnected"))
+
+@test
+fn test_the_limits_an_implementation_reports_are_checked() [mutate, time]
+    let low = faulty.faulty(world())
+    low.set_max_mtu(10)
+    test.assert(mentions(conformance.run(low, sensor(), plan(), 1000), "max_mtu"))
+    let none = faulty.faulty(world())
+    none.set_max_write(0)
+    test.assert(mentions(conformance.run(none, sensor(), plan(), 1000), "max_write"))
+    let blind = faulty.faulty(world())
+    blind.hide_services()
+    test.assert(mentions(conformance.run(blind, sensor(), plan(), 1000), "found no service"))
+
+@test
+fn test_an_operation_on_an_ended_link_must_be_refused_with_the_right_code() [mutate, time]
+    let lax = faulty.faulty(world())
+    lax.accept_dead_read()
+    test.assert(mentions(conformance.run(lax, sensor(), plan(), 1000), "was accepted"))
+    let wrong = faulty.faulty(world())
+    wrong.wrong_code()
+    test.assert(mentions(conformance.run(wrong, sensor(), plan(), 1000), "not E_NOT_CONNECTED"))
+
+@test
+fn test_the_faulty_double_forwards_scans() [mutate]
+    let dev = faulty.faulty(world())
+    test.assert(dev.scan_start(central.scan_all()) == None)
+    test.assert(dev.inner.scanning())
+    dev.scan_stop()
+    test.assert(not dev.inner.scanning())

@@ -1,0 +1,97 @@
+// conformance: the checks every implementation of `GattCentral` passes.
+//
+// An implementation is the operating system of a phone, the noble Host over a radio, or a double.  They differ where `caps` says and
+// nowhere else: a connect is followed by `Connected`, a discovery by `Discovered`, a read by `ReadDone` in the order the reads were
+// issued, a write by `WriteDone`, a subscription by `SubscribeDone` and then `Notified`, a link that ends by `Disconnected`, and an operation on
+// a link that has ended is refused with `E_NOT_CONNECTED`.  `run` makes those calls on a device and answers the checks that failed.
+//
+// The device is the one the caller names and the characteristics are the ones its `Plan` names, so the same suite runs against the double
+// of `scripted.nv` in a test and against a board on the bench from a phone or a PC.  A `Plan` that names no write or notify characteristic
+// skips those checks.
+//
+//   let failed = conformance.run(central, peer, plan, 5000)
+//   test.assert_eq(list.len(failed), 0)
+
+use central
+use session
+
+// What the suite may use on the device.
+pub struct Plan
+    service: Uuid
+    read_char: Uuid
+    write_char: ?Uuid
+    write_value: [u8]
+    notify_char: ?Uuid
+
+// Runs the checks; the text of every one that failed, none when all passed.
+pub fn run<C: GattCentral[e]>(c: C, peer: PeerId, plan: Plan, ms: Int) -> [Str] [e, mutate, time]
+    var failed: [Str] = []
+    let p = session.pump()
+    if c.adapter() != AdapterState.On
+        list.push(failed, "the adapter is not on")
+        return failed
+    if c.caps().max_mtu < 23
+        list.push(failed, "caps.max_mtu is below the minimum MTU of 23")
+    let opts = ConnectOptions { timeout_ms: ms, security: Security.Unsecured }
+    match session.open_link(c, p, peer, opts, 247)
+        Err(x)   =>
+            list.push(failed, "open_link: ${x.message()}")
+            return failed
+        Ok(link) =>
+            if c.max_write(link, false) < 1 or c.max_write(link, true) < 1
+                list.push(failed, "max_write is below 1")
+            if list.len(c.services(link)) == 0
+                list.push(failed, "the discovery found no service")
+            match session.find_char(c, link, plan.service, plan.read_char)
+                None     => list.push(failed, "the plan's read characteristic is not on the device")
+                Some(rc) =>
+                    // Two reads issued back to back complete in the order they were issued.
+                    let r1 = c.read(link, rc.ref)
+                    let r2 = c.read(link, rc.ref)
+                    if r1 != None or r2 != None
+                        list.push(failed, "a read was refused")
+                    else
+                        match session.await_event(c, p, T_READ_DONE, link.id, rc.ref.idx, ms)
+                            Some(ReadDone(_, _, st, first)) =>
+                                if st != 0
+                                    list.push(failed, "the first read ended with the status ${st}")
+                                match session.await_event(c, p, T_READ_DONE, link.id, rc.ref.idx, ms)
+                                    Some(ReadDone(_, _, st2, second)) =>
+                                        if st2 != 0 or list.len(first) != list.len(second)
+                                            list.push(failed, "the second read differs from the first")
+                                    _                                 => list.push(failed, "the second of two reads never completed")
+                            _                               => list.push(failed, "the first of two reads never completed")
+                    match plan.write_char
+                        None     => ()
+                        Some(wu) =>
+                            match session.find_char(c, link, plan.service, wu)
+                                None     => list.push(failed, "the plan's write characteristic is not on the device")
+                                Some(wc) =>
+                                    match session.write_all(c, p, link, wc.ref, plan.write_value, true, ms)
+                                        Some(x) => list.push(failed, "write_all: ${x.message()}")
+                                        None    => ()
+            match plan.notify_char
+                None     => ()
+                Some(nu) =>
+                    match session.find_char(c, link, plan.service, nu)
+                        None     => list.push(failed, "the plan's notify characteristic is not on the device")
+                        Some(nc) =>
+                            match session.subscribe_wait(c, p, link, nc.ref, SubMode.Notify, ms)
+                                Some(x) => list.push(failed, "subscribe_wait: ${x.message()}")
+                                None    => ()
+            match c.priority(link, Priority.High)
+                Some(x) =>
+                    if c.caps().priority
+                        list.push(failed, "priority is advertised in caps and was refused: ${x.message()}")
+                None    => ()
+            c.disconnect(link)
+            match session.await_event(c, p, T_DISCONNECTED, link.id, 0 - 1, ms)
+                Some(_) => ()
+                None    => list.push(failed, "disconnect was not followed by Disconnected")
+            match c.read(link, CharRef { link: link.id, idx: 0 })
+                Some(x) =>
+                    if x.code != E_NOT_CONNECTED
+                        list.push(failed,
+                            "a read on an ended link was refused with ${x.code} and not E_NOT_CONNECTED")
+                None    => list.push(failed, "a read on an ended link was accepted")
+    failed

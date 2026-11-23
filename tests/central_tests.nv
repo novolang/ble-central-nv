@@ -1,0 +1,83 @@
+// central_tests: the identifiers and values of src/central.nv.
+//
+//   novo test tests/central_tests.nv
+
+use std.test
+use central
+
+@test
+fn test_a_16_bit_uuid_is_the_base_uuid_with_its_digits() [mutate]
+    test.assert_eq(central.uuid_text(central.uuid16(0x180D)), "0000180d-0000-1000-8000-00805f9b34fb")
+    test.assert_eq(central.uuid_text(central.uuid16(0xFFFF)), "0000ffff-0000-1000-8000-00805f9b34fb")
+
+@test
+fn test_uuids_are_read_from_their_text() [mutate]
+    match central.uuid_from_text("180D")
+        Some(u) => test.assert(central.uuid_eq(u, central.uuid16(0x180D)))
+        None    => test.assert(false)
+    match central.uuid_from_text("180d")
+        Some(u) => test.assert(central.uuid_eq(u, central.uuid16(0x180D)))
+        None    => test.assert(false)
+    match central.uuid_from_text("0000180D")
+        Some(u) => test.assert(central.uuid_eq(u, central.uuid16(0x180D)))
+        None    => test.assert(false)
+    match central.uuid_from_text("1234ABCD")
+        Some(u) => test.assert_eq(central.uuid_text(u), "1234abcd-0000-1000-8000-00805f9b34fb")
+        None    => test.assert(false)
+    match central.uuid_from_text("8D53DC1D-1DB7-4CD3-868B-8A527460AA84")
+        Some(u) => test.assert_eq(central.uuid_text(u), "8d53dc1d-1db7-4cd3-868b-8a527460aa84")
+        None    => test.assert(false)
+
+@test
+fn test_text_that_is_not_a_uuid_is_refused() [mutate]
+    test.assert(central.uuid_from_text("") == None)
+    test.assert(central.uuid_from_text("180") == None)
+    test.assert(central.uuid_from_text("180G") == None)
+    test.assert(central.uuid_from_text("12345") == None)
+    test.assert(central.uuid_from_text("8D53DC1D1DB74CD3868B8A527460AA84ABCD") == None)
+    test.assert(central.uuid_from_text("8D53DC1D1DB74CD3868B8A527460AA84") == None)
+    test.assert(central.uuid_from_text("8D53DC1D-1DB7-4CD3-868B-8A527460AA8") == None)
+    test.assert(central.uuid_from_text("8D53DC1D-1DB7-4CD3-868B-8A527460AA8-") == None)
+    test.assert(central.uuid_from_text("8D53DC1D1-DB7-4CD3-868B-8A527460AA84") == None)
+    test.assert(central.uuid_from_text("8D53DC1D-1DB7-4CD3-868B-8A527460AAZ4") == None)
+
+@test
+fn test_a_uuid_from_16_bytes() [mutate]
+    let ok: [u8] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    match central.uuid_from_bytes(ok)
+        Some(u) => test.assert_eq(central.uuid_text(u), "01020304-0506-0708-090a-0b0c0d0e0f10")
+        None    => test.assert(false)
+    let short: [u8] = [1, 2, 3]
+    test.assert(central.uuid_from_bytes(short) == None)
+
+@test
+fn test_uuids_are_equal_when_all_their_bytes_are() [mutate]
+    test.assert(central.uuid_eq(central.uuid16(0x2A37), central.uuid16(0x2A37)))
+    test.assert(not central.uuid_eq(central.uuid16(0x2A37), central.uuid16(0x2A38)))
+    test.assert(not central.uuid_eq(central.uuid16(0x2A37), central.uuid16(0x2B37)))
+
+@test
+fn test_a_peer_is_its_key() [mutate]
+    let a = central.peer("AA:BB")
+    test.assert_eq(central.peer_key(a), "AA:BB")
+    test.assert(central.peer_eq(a, central.peer("AA:BB")))
+    test.assert(not central.peer_eq(a, central.peer("AA:BC")))
+
+@test
+fn test_the_filters_and_the_options_start_from_the_common_case() [mutate]
+    let all = central.scan_all()
+    test.assert_eq(list.len(all.services), 0)
+    test.assert_eq(all.name_prefix, "")
+    test.assert(all.only == None)
+    let one = central.scan_service(central.uuid16(0x180D))
+    test.assert_eq(list.len(one.services), 1)
+    let opts = central.connect_default()
+    test.assert_eq(opts.timeout_ms, 10000)
+    test.assert(opts.security == Security.Unsecured)
+
+@test
+fn test_an_error_says_what_failed() [mutate]
+    let e = central.error(E_TIMEOUT, "the read did not complete")
+    test.assert_eq(e.code, E_TIMEOUT)
+    test.assert_eq(e.message(), "the read did not complete (7)")
+    test.assert(E_GATT > E_BAD_ARGUMENT)

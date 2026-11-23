@@ -1,0 +1,281 @@
+// central: the Central role of Bluetooth LE at the level of GATT operations.
+//
+// A phone gives a program scan, connect, discover, read, write and subscribe, and never the radio below them; the noble Host gives the same
+// operations over a radio it drives itself; a test gives them over nothing.  A program that codes against this trait runs over all three.
+// Nothing here names an operating system: a peer is an opaque key, a security level is a request, connection parameters are advice, and the
+// size of a write is the largest the implementation will take, which is what an ATT MTU less its header is where there is an MTU and what a
+// platform reports where there is none.
+//
+// Every operation returns when the implementation has accepted it, and its result is an event: one `next_event` is the place a program waits.
+// The one-operation-at-a-time rule of a platform belongs to the implementation, which queues; a program may issue operations back to back.
+// An event whose result the program did not wait for is not lost: it stays in the stream.  A stream that overflows says so with `Dropped`.
+
+// ── Identifiers ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+// A UUID, 16 octets in the order of its text, most significant first.
+pub struct Uuid
+    b: [u8]
+
+// The Bluetooth base UUID is 0000xxxx-0000-1000-8000-00805F9B34FB; a 16-bit UUID is `xxxx`.
+pub fn uuid16(v: Int) -> Uuid
+    let base: [u8] = [0, 0, ((v >> 8) & 255) as u8, (v & 255) as u8, 0, 0, 16, 0, 128, 0, 0, 128, 95, 155, 52, 251]
+    Uuid { b: base }
+
+// A UUID from 16 octets; None when the list is not 16 long.
+pub fn uuid_from_bytes(b: [u8]) -> ?Uuid
+    if list.len(b) != 16
+        return None
+    Some(Uuid { b: b })
+
+fn hex_value(c: Int) -> Int
+    if c >= 48 and c <= 57
+        return c - 48
+    if c >= 97 and c <= 102
+        return c - 87
+    if c >= 65 and c <= 70
+        return c - 55
+    0 - 1
+
+// A UUID from its text: 4 hexadecimal digits (16 bits), 8 (32 bits) or the 36 characters with dashes.  None for anything else.
+pub fn uuid_from_text(s: Str) -> ?Uuid
+    var digits: [Int] = []
+    let n = str.len(s)
+    for i in 0..n
+        let c = str.byte_at_or(s, i, 0)
+        if c == 45
+            if n != 36 or i != 8 and i != 13 and i != 18 and i != 23
+                return None
+        else
+            let v = hex_value(c)
+            if v < 0
+                return None
+            list.push(digits, v)
+    let d = list.len(digits)
+    if n == 36 and d != 32
+        return None
+    if n != 36 and d != 4 and d != 8
+        return None
+    if d == 4
+        return Some(uuid16(digits[0] * 4096 + digits[1] * 256 + digits[2] * 16 + digits[3]))
+    var out: [u8] = []
+    if d == 8
+        let head: [u8] = [(digits[0] * 16 + digits[1]) as u8,
+            (digits[2] * 16 + digits[3]) as u8,
+            (digits[4] * 16 + digits[5]) as u8,
+            (digits[6] * 16 + digits[7]) as u8,
+            0,
+            0,
+            16,
+            0,
+            128,
+            0,
+            0,
+            128,
+            95,
+            155,
+            52,
+            251]
+        return Some(Uuid { b: head })
+    for i in 0..16
+        list.push(out, (digits[2 * i] * 16 + digits[2 * i + 1]) as u8)
+    Some(Uuid { b: out })
+
+fn hex_digit(v: Int) -> Str
+    str.slice("0123456789abcdef", v, v + 1)
+
+// The 36 characters of a UUID, lower case.
+pub fn uuid_text(u: Uuid) -> Str
+    var out = ""
+    for i in 0..16
+        if i == 4 or i == 6 or i == 8 or i == 10
+            out = "${out}-"
+        let v = u.b[i] as Int
+        out = "${out}${hex_digit(v / 16)}${hex_digit(v % 16)}"
+    out
+
+// Whether two UUIDs are the same.
+pub fn uuid_eq(a: Uuid, b: Uuid) -> Bool
+    for i in 0..16
+        if a.b[i] != b.b[i]
+            return false
+    true
+
+// The device a link or a scan result belongs to, as an opaque key the implementation makes and understands: an address on a platform
+// that has one, an identifier on one that has not.  A program keeps the key (`peer_key`) and makes the peer again with `peer`; it never
+// reads the key.  Two peers are the same when their keys are.
+pub struct PeerId
+    key: Str
+
+// The peer for a key an implementation made earlier.
+pub fn peer(key: Str) -> PeerId
+    PeerId { key: key }
+
+// The key to keep.
+pub fn peer_key(p: PeerId) -> Str
+    p.key
+
+// Whether two peers are the same device.
+pub fn peer_eq(a: PeerId, b: PeerId) -> Bool
+    a.key == b.key
+
+// A connection, from `Connected` to `Disconnected`.
+pub struct LinkId
+    id: Int
+
+// A characteristic of a link, valid from `Discovered` until `Disconnected` or `ServicesChanged`.
+pub struct CharRef
+    link: Int
+    idx: Int
+
+// ── Values ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+// The bits of `CharInfo.props`, as the characteristic's properties are.
+pub const PROP_READ = 2
+// The characteristic accepts a write without a response.
+pub const PROP_WRITE_NO_RSP = 4
+// The characteristic accepts a write with a response.
+pub const PROP_WRITE = 8
+// The characteristic can notify.
+pub const PROP_NOTIFY = 16
+// The characteristic can indicate.
+pub const PROP_INDICATE = 32
+
+// A characteristic of a discovered service: its UUID, its reference and its properties.
+pub struct CharInfo
+    uuid: Uuid
+    ref: CharRef
+    props: Int
+
+// A discovered service and its characteristics.
+pub struct ServiceInfo
+    uuid: Uuid
+    chars: [CharInfo]
+
+// What the adapter lets a program do.
+pub enum AdapterState
+    Off
+    On
+    NoPermission
+    Unsupported
+
+// What a subscription asks for.
+pub enum SubMode
+    Off
+    Notify
+    Indicate
+
+// The link quality a program asks for; advice, which an implementation that cannot act on says through `Caps.priority`.
+pub enum Priority
+    LowPower
+    Balanced
+    High
+
+// A security level a program asks the link to reach.  The program asks and the implementation decides how and whether: a platform shows its own dialog,
+// a Host runs a procedure.  `Dropped` and the errors say what came of it; no implementation exposes a procedure.
+pub enum Security
+    Unsecured
+    Encrypted
+    Authenticated
+
+// What an implementation can do beyond the common core.
+pub struct Caps
+    priority: Bool
+    bonding: Bool
+    phy_2m: Bool
+    background: Bool
+    max_mtu: Int
+
+// What a scan looks for: service UUIDs (any of them), a name prefix, or one peer.  An empty filter matches every advertiser.
+pub struct ScanFilter
+    services: [Uuid]
+    name_prefix: Str
+    only: ?PeerId
+
+// A filter that matches every advertiser.
+pub fn scan_all() -> ScanFilter
+    ScanFilter { services: [], name_prefix: "", only: None }
+
+// A filter for one service.
+pub fn scan_service(u: Uuid) -> ScanFilter
+    ScanFilter { services: [u], name_prefix: "", only: None }
+
+// How a connection is made: the time allowed and the security level asked for.
+pub struct ConnectOptions
+    timeout_ms: Int
+    security: Security
+
+// Ten seconds, no security asked.
+pub fn connect_default() -> ConnectOptions
+    ConnectOptions { timeout_ms: 10000, security: Security.Unsecured }
+
+// The codes of `BleError`.  A code of 1000 or more is the platform's own GATT status, 1000 added.
+pub const E_BUSY = 1
+// The link has ended or was never made.
+pub const E_NOT_CONNECTED = 2
+// The implementation cannot do it.
+pub const E_UNSUPPORTED = 3
+// The platform has not given the app the permission.
+pub const E_PERMISSION = 4
+// The adapter is not on.
+pub const E_ADAPTER_OFF = 5
+// No such device or characteristic.
+pub const E_NOT_FOUND = 6
+// The result did not come in time.
+pub const E_TIMEOUT = 7
+// An argument is outside what the implementation accepts.
+pub const E_BAD_ARGUMENT = 8
+// Added to a GATT status that is not 0 to make a code.
+pub const E_GATT = 1000
+
+// What failed: a code and a sentence.
+pub struct BleError
+    code: Int
+    text: Str
+
+// An error with a code and a sentence.
+pub fn error(code: Int, text: Str) -> BleError
+    BleError { code: code, text: text }
+
+impl Error for BleError
+    fn message(self) -> Str
+        "${self.text} (${self.code})"
+
+// The event stream.  `status` is 0 for success and a platform's GATT status (`E_GATT` added) otherwise.
+pub enum CentralEvent
+    AdapterChanged(state: AdapterState)
+    ScanResult(peer: PeerId, rssi: Int, name: Str, advertisement: [u8])
+    ScanFailed(code: Int)
+    Connected(link: LinkId, peer: PeerId, status: Int)
+    Disconnected(link: LinkId, reason: Int)
+    Discovered(link: LinkId, status: Int)
+    ReadDone(link: LinkId, ch: CharRef, status: Int, data: [u8])
+    WriteDone(link: LinkId, ch: CharRef, status: Int)
+    SubscribeDone(link: LinkId, ch: CharRef, status: Int)
+    Notified(link: LinkId, ch: CharRef, data: [u8])
+    MtuChanged(link: LinkId, mtu: Int, status: Int)
+    PriorityChanged(link: LinkId, status: Int)
+    ServicesChanged(link: LinkId)
+    BondChanged(link: LinkId, bonded: Bool)
+    Dropped(count: Int)
+
+// The Central role.  `e` is the effect of reaching the stack: `hw` for a radio, `io` for a bridge, none for a double.
+pub trait GattCentral[e]
+    fn caps(self) -> Caps
+    fn adapter(self) -> AdapterState [e]
+    fn scan_start(self, filter: ScanFilter) -> ?BleError [e, mutate]
+    fn scan_stop(self) [e, mutate]
+    fn connect(self, p: PeerId, opts: ConnectOptions) -> Result<LinkId, BleError> [e, mutate]
+    fn disconnect(self, link: LinkId) [e, mutate]
+    // Starts the discovery of the link's services; `Discovered` says it is done.  `services` answers the result.
+    fn discover(self, link: LinkId) -> ?BleError [e, mutate]
+    fn services(self, link: LinkId) -> [ServiceInfo]
+    fn read(self, link: LinkId, ch: CharRef) -> ?BleError [e, mutate]
+    fn write(self, link: LinkId, ch: CharRef, data: [u8], ack: Bool) -> ?BleError [e, mutate]
+    fn subscribe(self, link: LinkId, ch: CharRef, mode: SubMode) -> ?BleError [e, mutate]
+    // A hint: the implementation asks for this MTU where it can; `MtuChanged` says what the link has.
+    fn request_mtu(self, link: LinkId, mtu: Int) -> ?BleError [e, mutate]
+    // The most bytes one write takes on the link, with an answer (`ack`) or without.
+    fn max_write(self, link: LinkId, ack: Bool) -> Int
+    fn priority(self, link: LinkId, p: Priority) -> ?BleError [e, mutate]
+    // The next event, or None after `timeout_ms` milliseconds.  The one place a program waits: a task that calls it parks.
+    fn next_event(self, timeout_ms: Int) -> ?CentralEvent [e, mutate]

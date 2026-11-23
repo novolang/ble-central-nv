@@ -1,0 +1,366 @@
+// scripted: a `GattCentral` with a peripheral inside it, for tests.
+//
+// Nothing is opened and no time passes.  A test describes the world (the devices in range and their services), makes calls, and reads back
+// what the program did; the implementation answers each call the way a platform does, with an event: a `connect` is followed by `Connected`,
+// a `read` by `ReadDone` with the value the test gave the characteristic, a `write` by `WriteDone` and the value stored.  A test pushes the events a
+// peripheral makes on its own (`push`: a notification, a disconnect, `ServicesChanged`), turns the next call into a refusal (`refuse`)
+// or into a call that is accepted and never answered (`silence`), and sets the adapter's state and the limits of the link.
+//
+//   let dev = scripted.scripted()
+//   scripted.add_device(dev, "AA:01", "Sensor")
+//   scripted.add_service(dev, uuid16(0x180D), [scripted.char_spec(uuid16(0x2A37), PROP_NOTIFY, [])])
+//   dev.scan_start(scan_all())
+//   scripted.push(dev, Notified(...))
+//
+// The services are the same for every device, which is all the tests of a client of one service need.  `next_event` answers the
+// oldest event, or None: the timeout it is given is not waited for.
+
+use central
+
+// A device in range.
+struct Device
+    key: Str
+    name: Str
+
+// A characteristic as a test describes it: its UUID, its properties and its value.
+pub struct CharSpec
+    uuid: Uuid
+    props: Int
+    var value: [u8]
+
+// A service: its UUID and the indexes of its characteristics in the table of values.
+struct ServiceSpec
+    uuid: Uuid
+    first: Int
+    count: Int
+
+// What the double keeps.  A struct is a reference, so the methods of `Scripted`, whose receiver is by value, reach it through a local `var`.
+struct World
+    var devices: [Device]
+    var services: [ServiceSpec]
+    var chars: [CharSpec]
+    var queue: [CentralEvent]
+    var calls: [Str]
+    var links: [Int]
+    var next_link: Int
+    var refused: [Str]
+    var refused_code: [Int]
+    var silent: [Str]
+    var adapter: AdapterState
+    var scanning: Bool
+    var mtu: Int
+    var mtu_limit: Int
+    var priority: Int
+    var subs: [Int]
+
+// The double.
+pub struct Scripted
+    w: World
+
+// A double with no device, the adapter on, an MTU of 23 that the peer lets rise to 247.
+pub fn scripted() -> Scripted
+    Scripted { w: World { devices: [], services: [], chars: [], queue: [], calls: [], links: [], next_link: 1,
+                          refused: [], refused_code: [], silent: [], adapter: AdapterState.On, scanning: false,
+                          mtu: 23, mtu_limit: 247, priority: 0, subs: [] } }
+
+// A characteristic for `add_service`.
+pub fn char_spec(uuid: Uuid, props: Int, value: [u8]) -> CharSpec
+    CharSpec { uuid: uuid, props: props, value: value[:] }
+
+impl Scripted
+    // A device that advertises, by the key a program will know it by.
+    fn add_device(self, key: Str, name: Str) [mutate]
+        var w = self.w
+        list.push(w.devices, Device { key: key, name: name })
+
+    // A service on every device.
+    fn add_service(self, uuid: Uuid, chars: [CharSpec]) [mutate]
+        var w = self.w
+        list.push(w.services, ServiceSpec { uuid: uuid, first: list.len(w.chars), count: list.len(chars) })
+        for c in chars
+            list.push(w.chars, c)
+
+    // Queues an event the peripheral makes on its own.
+    fn push(self, e: CentralEvent) [mutate]
+        var w = self.w
+        list.push(w.queue, e)
+
+    // The next call named `op` is refused with `code`.
+    fn refuse(self, op: Str, code: Int) [mutate]
+        var w = self.w
+        list.push(w.refused, op)
+        list.push(w.refused_code, code)
+
+    // The next call named `op` is accepted and never answered.
+    fn silence(self, op: Str) [mutate]
+        var w = self.w
+        list.push(w.silent, op)
+
+    // The state of the adapter.
+    fn set_adapter(self, state: AdapterState) [mutate]
+        var w = self.w
+        w.adapter = state
+
+    // The largest MTU the peer accepts.
+    fn set_mtu_limit(self, mtu: Int) [mutate]
+        var w = self.w
+        w.mtu_limit = mtu
+
+    // The calls so far, one text each: the operation and its arguments.
+    fn calls(self) -> [Str]
+        self.w.calls[:]
+
+    // The value of the characteristic with the index.
+    fn value_of(self, idx: Int) -> [u8]
+        self.w.chars[idx].value[:]
+
+    // The subscription mode last set on the characteristic with the index: 0 off, 1 notify, 2 indicate.
+    fn sub_of(self, idx: Int) -> Int
+        let w = self.w
+        if idx < list.len(w.subs)
+            return w.subs[idx]
+        0
+
+    // The priority last asked for: 0 low power, 1 balanced, 2 high.
+    fn priority_asked(self) -> Int
+        self.w.priority
+
+    // Whether a scan is running.
+    fn scanning(self) -> Bool
+        self.w.scanning
+
+    // The number of events waiting.
+    fn queued(self) -> Int
+        list.len(self.w.queue)
+
+// Whether `op` is to be refused now; the code, or 0.
+fn refusal(w: World, op: Str) -> Int [mutate]
+    var ww = w
+    for i in 0..list.len(ww.refused)
+        if ww.refused[i] == op
+            let code = ww.refused_code[i]
+            var rest: [Str] = []
+            var rest_code: [Int] = []
+            for j in 0..list.len(ww.refused)
+                if j != i
+                    list.push(rest, ww.refused[j])
+                    list.push(rest_code, ww.refused_code[j])
+            ww.refused = rest
+            ww.refused_code = rest_code
+            return code
+    0
+
+// Whether `op` is to go unanswered now.
+fn silenced(w: World, op: Str) -> Bool [mutate]
+    var ww = w
+    for i in 0..list.len(ww.silent)
+        if ww.silent[i] == op
+            var rest: [Str] = []
+            for j in 0..list.len(ww.silent)
+                if j != i
+                    list.push(rest, ww.silent[j])
+            ww.silent = rest
+            return true
+    false
+
+fn linked(w: World, link: LinkId) -> Bool
+    for l in w.links
+        if l == link.id
+            return true
+    false
+
+// What every call checks first: a refusal the test set, the link, the adapter.
+fn precheck(w: World, op: Str, link: LinkId, needs_link: Bool) -> ?BleError [mutate]
+    let code = refusal(w, op)
+    if code != 0
+        return Some(central.error(code, "${op} refused by the script"))
+    if w.adapter != AdapterState.On
+        return Some(central.error(E_ADAPTER_OFF, "the adapter is not on"))
+    if needs_link and not linked(w, link)
+        return Some(central.error(E_NOT_CONNECTED, "${op} on a link that is not connected"))
+    None
+
+fn matches(d: Device, f: ScanFilter) -> Bool
+    match f.only
+        Some(p) =>
+            if p.key != d.key
+                return false
+        None    => ()
+    if str.len(f.name_prefix) > 0 and not str.starts_with(d.name, f.name_prefix)
+        return false
+    true
+
+impl GattCentral[mutate] for Scripted
+    fn caps(self) -> Caps
+        Caps { priority: true,
+            bonding: false,
+            phy_2m: false,
+            background: false,
+            max_mtu: self.w.mtu_limit }
+
+    fn adapter(self) -> AdapterState [mutate]
+        self.w.adapter
+
+    fn scan_start(self, filter: ScanFilter) -> ?BleError [mutate]
+        var w = self.w
+        list.push(w.calls, "scan_start")
+        match precheck(w, "scan_start", LinkId { id: 0 }, false)
+            Some(x) =>
+                return Some(x)
+            None    => ()
+        w.scanning = true
+        for d in w.devices
+            if matches(d, filter)
+                list.push(w.queue, ScanResult(PeerId { key: d.key }, 0 - 60, d.name, []))
+        None
+
+    fn scan_stop(self) [mutate]
+        var w = self.w
+        list.push(w.calls, "scan_stop")
+        w.scanning = false
+
+    fn connect(self, p: PeerId, opts: ConnectOptions) -> Result<LinkId, BleError> [mutate]
+        var w = self.w
+        list.push(w.calls, "connect ${p.key}")
+        match precheck(w, "connect", LinkId { id: 0 }, false)
+            Some(x) =>
+                return Err(x)
+            None    => ()
+        var known = false
+        for d in w.devices
+            if d.key == p.key
+                known = true
+        if not known
+            return Err(central.error(E_NOT_FOUND, "no device ${p.key} in range"))
+        let link = LinkId { id: w.next_link }
+        w.next_link = w.next_link + 1
+        list.push(w.links, link.id)
+        if not silenced(w, "connect")
+            list.push(w.queue, Connected(link, p, 0))
+        Ok(link)
+
+    fn disconnect(self, link: LinkId) [mutate]
+        var w = self.w
+        list.push(w.calls, "disconnect ${link.id}")
+        if not linked(w, link)
+            return
+        var rest: [Int] = []
+        for l in w.links
+            if l != link.id
+                list.push(rest, l)
+        w.links = rest
+        list.push(w.queue, Disconnected(link, 0))
+
+    fn discover(self, link: LinkId) -> ?BleError [mutate]
+        var w = self.w
+        list.push(w.calls, "discover ${link.id}")
+        match precheck(w, "discover", link, true)
+            Some(x) =>
+                return Some(x)
+            None    => ()
+        if not silenced(w, "discover")
+            list.push(w.queue, Discovered(link, 0))
+        None
+
+    fn services(self, link: LinkId) -> [ServiceInfo]
+        let w = self.w
+        var out: [ServiceInfo] = []
+        for s in w.services
+            var chars: [CharInfo] = []
+            for i in 0..s.count
+                let c = w.chars[s.first + i]
+                list.push(chars, CharInfo { uuid: c.uuid,
+                    ref: CharRef { link: link.id, idx: s.first + i },
+                    props: c.props })
+            list.push(out, ServiceInfo { uuid: s.uuid, chars: chars })
+        out
+
+    fn read(self, link: LinkId, ch: CharRef) -> ?BleError [mutate]
+        var w = self.w
+        list.push(w.calls, "read ${ch.idx}")
+        match precheck(w, "read", link, true)
+            Some(x) =>
+                return Some(x)
+            None    => ()
+        if ch.idx < 0 or ch.idx >= list.len(w.chars)
+            return Some(central.error(E_BAD_ARGUMENT, "no characteristic ${ch.idx}"))
+        if not silenced(w, "read")
+            list.push(w.queue, ReadDone(link, ch, 0, w.chars[ch.idx].value))
+        None
+
+    fn write(self, link: LinkId, ch: CharRef, data: [u8], ack: Bool) -> ?BleError [mutate]
+        var w = self.w
+        list.push(w.calls, "write ${ch.idx} ${list.len(data)} ${ack}")
+        match precheck(w, "write", link, true)
+            Some(x) =>
+                return Some(x)
+            None    => ()
+        if ch.idx < 0 or ch.idx >= list.len(w.chars)
+            return Some(central.error(E_BAD_ARGUMENT, "no characteristic ${ch.idx}"))
+        if list.len(data) > w.mtu - 3
+            return Some(central.error(E_BAD_ARGUMENT, "a write of ${list.len(data)} bytes does not fit an MTU of ${w.mtu}"))
+        w.chars[ch.idx].value = data[:]
+        if not silenced(w, "write")
+            list.push(w.queue, WriteDone(link, ch, 0))
+        None
+
+    fn subscribe(self, link: LinkId, ch: CharRef, mode: SubMode) -> ?BleError [mutate]
+        var w = self.w
+        list.push(w.calls, "subscribe ${ch.idx}")
+        match precheck(w, "subscribe", link, true)
+            Some(x) =>
+                return Some(x)
+            None    => ()
+        for _i in 0..ch.idx + 1
+            if list.len(w.subs) <= ch.idx
+                list.push(w.subs, 0)
+        w.subs[ch.idx] = match mode
+            SubMode.Off      => 0
+            SubMode.Notify   => 1
+            SubMode.Indicate => 2
+        if not silenced(w, "subscribe")
+            list.push(w.queue, SubscribeDone(link, ch, 0))
+        None
+
+    fn request_mtu(self, link: LinkId, mtu: Int) -> ?BleError [mutate]
+        var w = self.w
+        list.push(w.calls, "request_mtu ${mtu}")
+        match precheck(w, "request_mtu", link, true)
+            Some(x) =>
+                return Some(x)
+            None    => ()
+        w.mtu = if mtu < w.mtu_limit
+            mtu
+        else
+            w.mtu_limit
+        if w.mtu < 23
+            w.mtu = 23
+        if not silenced(w, "request_mtu")
+            list.push(w.queue, MtuChanged(link, w.mtu, 0))
+        None
+
+    fn max_write(self, link: LinkId, ack: Bool) -> Int
+        self.w.mtu - 3
+
+    fn priority(self, link: LinkId, p: Priority) -> ?BleError [mutate]
+        var w = self.w
+        list.push(w.calls, "priority")
+        match precheck(w, "priority", link, true)
+            Some(x) =>
+                return Some(x)
+            None    => ()
+        w.priority = match p
+            Priority.LowPower => 0
+            Priority.Balanced => 1
+            Priority.High     => 2
+        if not silenced(w, "priority")
+            list.push(w.queue, PriorityChanged(link, 0))
+        None
+
+    fn next_event(self, timeout_ms: Int) -> ?CentralEvent [mutate]
+        var w = self.w
+        if list.len(w.queue) == 0
+            return None
+        let e = w.queue[0]
+        w.queue = w.queue[1:list.len(w.queue)]
+        Some(e)

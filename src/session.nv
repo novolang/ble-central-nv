@@ -1,0 +1,343 @@
+// session: the calls every service client makes over a `GattCentral`: connect and wait, discover and find a service, read, write and
+// subscribe and wait for the result, take the next notification.
+//
+// An implementation reports results as events, in the order they happen, and a program waits in one place.  A call here waits for the
+// event it needs and keeps every other event in the `Pump`, so a notification that arrives while a read is pending is not lost: the
+// next `notification` or `await_event` finds it.  A result that never comes ends at the deadline with `E_TIMEOUT`; the link going away ends
+// the wait with `E_NOT_CONNECTED`.  A GATT status that is not 0 is the error `E_GATT` plus the status.
+
+use central
+
+// What the pump keeps: the events seen and not yet asked for.  A struct is a reference, so the fields live in `PumpState` and the
+// functions reach them through a local `var`.
+struct PumpState
+    var backlog: [CentralEvent]
+    var lost: Int
+
+// The events a wait has seen and set aside.
+pub struct Pump
+    st: PumpState
+
+// The most events the pump keeps; the oldest goes when there are more, and the count of those is `lost`.
+pub const BACKLOG_MAX = 256
+
+// An empty pump.
+pub fn pump() -> Pump
+    Pump { st: PumpState { backlog: [], lost: 0 } }
+
+// The number of events the pump dropped because its backlog was full.
+pub fn pump_lost(p: Pump) -> Int
+    p.st.lost
+
+// The events waiting in the pump.
+pub fn pump_pending(p: Pump) -> Int
+    list.len(p.st.backlog)
+
+// The number that names the kind of an event, for `await_event`.
+pub const T_ADAPTER = 1
+// The tag of `scan result` events.
+pub const T_SCAN_RESULT = 2
+// The tag of `scan failed` events.
+pub const T_SCAN_FAILED = 3
+// The tag of `connected` events.
+pub const T_CONNECTED = 4
+// The tag of `disconnected` events.
+pub const T_DISCONNECTED = 5
+// The tag of `discovered` events.
+pub const T_DISCOVERED = 6
+// The tag of `read done` events.
+pub const T_READ_DONE = 7
+// The tag of `write done` events.
+pub const T_WRITE_DONE = 8
+// The tag of `subscribe done` events.
+pub const T_SUBSCRIBE_DONE = 9
+// The tag of `notified` events.
+pub const T_NOTIFIED = 10
+// The tag of `mtu` events.
+pub const T_MTU = 11
+// The tag of `priority` events.
+pub const T_PRIORITY = 12
+// The tag of `services changed` events.
+pub const T_SERVICES_CHANGED = 13
+// The tag of `bond` events.
+pub const T_BOND = 14
+// The tag of `dropped` events.
+pub const T_DROPPED = 15
+
+// The kind of an event.
+pub fn tag(e: CentralEvent) -> Int
+    match e
+        AdapterChanged(_)      => T_ADAPTER
+        ScanResult(_, _, _, _) => T_SCAN_RESULT
+        ScanFailed(_)          => T_SCAN_FAILED
+        Connected(_, _, _)     => T_CONNECTED
+        Disconnected(_, _)     => T_DISCONNECTED
+        Discovered(_, _)       => T_DISCOVERED
+        ReadDone(_, _, _, _)   => T_READ_DONE
+        WriteDone(_, _, _)     => T_WRITE_DONE
+        SubscribeDone(_, _, _) => T_SUBSCRIBE_DONE
+        Notified(_, _, _)      => T_NOTIFIED
+        MtuChanged(_, _, _)    => T_MTU
+        PriorityChanged(_, _)  => T_PRIORITY
+        ServicesChanged(_)     => T_SERVICES_CHANGED
+        BondChanged(_, _)      => T_BOND
+        Dropped(_)             => T_DROPPED
+
+// The link an event belongs to; -1 for one that belongs to none.
+pub fn link_of(e: CentralEvent) -> Int
+    match e
+        Connected(l, _, _)     => l.id
+        Disconnected(l, _)     => l.id
+        Discovered(l, _)       => l.id
+        ReadDone(l, _, _, _)   => l.id
+        WriteDone(l, _, _)     => l.id
+        SubscribeDone(l, _, _) => l.id
+        Notified(l, _, _)      => l.id
+        MtuChanged(l, _, _)    => l.id
+        PriorityChanged(l, _)  => l.id
+        ServicesChanged(l)     => l.id
+        BondChanged(l, _)      => l.id
+        _                      => 0 - 1
+
+// The index of the characteristic an event is about; -1 for one that is about none.
+pub fn char_of(e: CentralEvent) -> Int
+    match e
+        ReadDone(_, c, _, _)   => c.idx
+        WriteDone(_, c, _)     => c.idx
+        SubscribeDone(_, c, _) => c.idx
+        Notified(_, c, _)      => c.idx
+        _                      => 0 - 1
+
+// The GATT status an event carries, 0 for one that carries none.
+pub fn status_of(e: CentralEvent) -> Int
+    match e
+        Connected(_, _, s)     => s
+        Discovered(_, s)       => s
+        ReadDone(_, _, s, _)   => s
+        WriteDone(_, _, s)     => s
+        SubscribeDone(_, _, s) => s
+        MtuChanged(_, _, s)    => s
+        PriorityChanged(_, s)  => s
+        _                      => 0
+
+// Whether `e` is the event a wait asks for: the kind, the link (-1: any) and the characteristic (-1: any).  An event that ends the link
+// also answers a wait on that link.
+fn answers(e: CentralEvent, want: Int, link: Int, ch: Int) -> Bool
+    let t = tag(e)
+    if link >= 0 and t == T_DISCONNECTED and link_of(e) == link
+        return true
+    if t != want
+        return false
+    if link >= 0 and link_of(e) != link
+        return false
+    if ch >= 0 and char_of(e) != ch
+        return false
+    true
+
+// Sets an event aside.
+fn keep(p: Pump, e: CentralEvent) [mutate]
+    var st = p.st
+    list.push(st.backlog, e)
+    if list.len(st.backlog) > BACKLOG_MAX
+        st.backlog = st.backlog[1:list.len(st.backlog)]
+        st.lost = st.lost + 1
+
+// Takes the first event of the backlog that answers the wait.
+fn take(p: Pump, want: Int, link: Int, ch: Int) -> ?CentralEvent [mutate]
+    var st = p.st
+    let n = list.len(st.backlog)
+    for i in 0..n
+        if answers(st.backlog[i], want, link, ch)
+            let e = st.backlog[i]
+            var rest: [CentralEvent] = []
+            for j in 0..n
+                if j != i
+                    list.push(rest, st.backlog[j])
+            st.backlog = rest
+            return Some(e)
+    None
+
+// Waits up to `ms` milliseconds for the event of kind `want` on `link` (-1: any link) about characteristic index `ch` (-1: any).  Events
+// that come meanwhile and are not it go to the pump.  A `Disconnected` of the link ends the wait and is what comes back.
+pub fn await_event<C: GattCentral[e]>(c: C, p: Pump, want: Int, link: Int, ch: Int,
+                                      ms: Int) -> ?CentralEvent [e, mutate, time]
+    match take(p, want, link, ch)
+        Some(found) =>
+            return Some(found)
+        None        => ()
+    let t0 = Mono.now()
+    for _i in 0..100000
+        let left = ms - t0.elapsed().ms()
+        if left <= 0
+            return None
+        match c.next_event(left)
+            None     =>
+                return None
+            Some(ev) =>
+                if answers(ev, want, link, ch)
+                    return Some(ev)
+                keep(p, ev)
+    // cov: skip — reached only after 100,000 events none of which answers; the deadline ends every real wait first
+    None
+
+// The error for a GATT status that is not 0.
+fn gatt_error(status: Int, what: Str) -> BleError
+    central.error(E_GATT + status, "${what} failed with the GATT status ${status}")
+
+// The error for an event that ended a wait that was not the result: the link went away, or nothing came.
+fn ended(got: ?CentralEvent, what: Str) -> BleError
+    match got
+        Some(_) => central.error(E_NOT_CONNECTED, "the link ended during ${what}")
+        None    => central.error(E_TIMEOUT, "${what} did not complete")
+
+// Connects and waits for `Connected`.  A connection that does not complete within the options' timeout is ended.
+pub fn connect_wait<C: GattCentral[e]>(c: C, p: Pump, peer: PeerId,
+                                       opts: ConnectOptions) -> Result<LinkId, BleError> [e, mutate, time]
+    match c.connect(peer, opts)
+        Err(x)   => Err(x)
+        Ok(link) =>
+            match await_event(c, p, T_CONNECTED, link.id, 0 - 1, opts.timeout_ms)
+                Some(ev) =>
+                    if tag(ev) != T_CONNECTED
+                        return Err(ended(Some(ev), "the connection"))
+                    if status_of(ev) != 0
+                        return Err(gatt_error(status_of(ev), "the connection"))
+                    Ok(link)
+                None     =>
+                    c.disconnect(link)
+                    Err(ended(None, "the connection"))
+
+// Discovers the services of the link and waits for `Discovered`.
+pub fn discover_wait<C: GattCentral[e]>(c: C, p: Pump, link: LinkId,
+                                        ms: Int) -> ?BleError [e, mutate, time]
+    match c.discover(link)
+        Some(x) =>
+            return Some(x)
+        None    => ()
+    match await_event(c, p, T_DISCOVERED, link.id, 0 - 1, ms)
+        Some(ev) =>
+            if tag(ev) != T_DISCOVERED
+                return Some(ended(Some(ev), "the discovery"))
+            if status_of(ev) != 0
+                return Some(gatt_error(status_of(ev), "the discovery"))
+            None
+        None     => Some(ended(None, "the discovery"))
+
+// The service with the UUID, after a discovery.
+pub fn find_service<C: GattCentral[e]>(c: C, link: LinkId, service: Uuid) -> ?ServiceInfo
+    for s in c.services(link)
+        if central.uuid_eq(s.uuid, service)
+            return Some(s)
+    None
+
+// The characteristic with the UUID in the service with the UUID, after a discovery.
+pub fn find_char<C: GattCentral[e]>(c: C, link: LinkId, service: Uuid, chr: Uuid) -> ?CharInfo
+    match find_service(c, link, service)
+        None    => None
+        Some(s) =>
+            for ch in s.chars
+                if central.uuid_eq(ch.uuid, chr)
+                    return Some(ch)
+            None
+
+// Reads a characteristic and waits for the value.
+pub fn read_wait<C: GattCentral[e]>(c: C, p: Pump, link: LinkId, ch: CharRef,
+                                    ms: Int) -> Result<[u8], BleError> [e, mutate, time]
+    match c.read(link, ch)
+        Some(x) => Err(x)
+        None    =>
+            match await_event(c, p, T_READ_DONE, link.id, ch.idx, ms)
+                Some(ReadDone(_, _, status, data)) =>
+                    if status != 0
+                        return Err(gatt_error(status, "the read"))
+                    Ok(data)
+                other                              => Err(ended(other, "the read"))
+
+// Writes a value and waits for the write to complete.  A write longer than `max_write` is the caller's to split (`write_all`).
+pub fn write_wait<C: GattCentral[e]>(c: C, p: Pump, link: LinkId, ch: CharRef, data: [u8],
+                                     ack: Bool, ms: Int) -> ?BleError [e, mutate, time]
+    match c.write(link, ch, data, ack)
+        Some(x) =>
+            return Some(x)
+        None    => ()
+    match await_event(c, p, T_WRITE_DONE, link.id, ch.idx, ms)
+        Some(WriteDone(_, _, status)) =>
+            if status != 0
+                return Some(gatt_error(status, "the write"))
+            None
+        other                         => Some(ended(other, "the write"))
+
+// Writes `data` in pieces of at most `max_write` bytes, each waited for.
+pub fn write_all<C: GattCentral[e]>(c: C, p: Pump, link: LinkId, ch: CharRef, data: [u8], ack: Bool,
+                                    ms: Int) -> ?BleError [e, mutate, time]
+    let size = c.max_write(link, ack)
+    if size < 1
+        return Some(central.error(E_UNSUPPORTED, "the link takes no write"))
+    var at = 0
+    let n = list.len(data)
+    for _i in 0..n / size + 1
+        if at >= n
+            break
+        let end = if at + size < n
+            at + size
+        else
+            n
+        match write_wait(c, p, link, ch, data[at:end], ack, ms)
+            Some(x) =>
+                return Some(x)
+            None    => ()
+        at = end
+    None
+
+// Subscribes to a characteristic and waits for the confirmation.
+pub fn subscribe_wait<C: GattCentral[e]>(c: C, p: Pump, link: LinkId, ch: CharRef, mode: SubMode,
+                                         ms: Int) -> ?BleError [e, mutate, time]
+    match c.subscribe(link, ch, mode)
+        Some(x) =>
+            return Some(x)
+        None    => ()
+    match await_event(c, p, T_SUBSCRIBE_DONE, link.id, ch.idx, ms)
+        Some(SubscribeDone(_, _, status)) =>
+            if status != 0
+                return Some(gatt_error(status, "the subscription"))
+            None
+        other                             => Some(ended(other, "the subscription"))
+
+// The next notification of a characteristic: its bytes, or the error when the link ended or nothing came.
+pub fn notification<C: GattCentral[e]>(c: C, p: Pump, link: LinkId, ch: CharRef,
+                                       ms: Int) -> Result<[u8], BleError> [e, mutate, time]
+    match await_event(c, p, T_NOTIFIED, link.id, ch.idx, ms)
+        Some(Notified(_, _, data)) => Ok(data)
+        other                      => Err(ended(other, "the wait for a notification"))
+
+// The MTU the link settled on after asking for `want`.
+pub fn mtu_wait<C: GattCentral[e]>(c: C, p: Pump, link: LinkId, want: Int,
+                                   ms: Int) -> Result<Int, BleError> [e, mutate, time]
+    match c.request_mtu(link, want)
+        Some(x) => Err(x)
+        None    =>
+            match await_event(c, p, T_MTU, link.id, 0 - 1, ms)
+                Some(MtuChanged(_, mtu, status)) =>
+                    if status != 0
+                        return Err(gatt_error(status, "the MTU exchange"))
+                    Ok(mtu)
+                other                            => Err(ended(other, "the MTU exchange"))
+
+// Connects, discovers and asks for the MTU: what every service client does first.  Answers the link with its services in place.
+pub fn open_link<C: GattCentral[e]>(c: C, p: Pump, peer: PeerId, opts: ConnectOptions,
+                                    want_mtu: Int) -> Result<LinkId, BleError> [e, mutate, time]
+    match connect_wait(c, p, peer, opts)
+        Err(x)   => Err(x)
+        Ok(link) =>
+            match discover_wait(c, p, link, opts.timeout_ms)
+                Some(x) =>
+                    c.disconnect(link)
+                    return Err(x)
+                None    => ()
+            if want_mtu > 23
+                match mtu_wait(c, p, link, want_mtu, opts.timeout_ms)
+                    Err(x) =>
+                        c.disconnect(link)
+                        return Err(x)
+                    Ok(_)  => ()
+            Ok(link)

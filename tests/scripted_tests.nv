@@ -1,0 +1,253 @@
+// scripted_tests: the scripted peripheral answers the way a platform does.
+//
+//   novo test tests/scripted_tests.nv
+
+use std.test
+use central
+use scripted
+
+fn bytes3() -> [u8]
+    let v: [u8] = [1, 2, 3]
+    v
+
+fn nothing() -> [u8]
+    let v: [u8] = []
+    v
+
+fn world() -> Scripted [mutate]
+    let dev = scripted.scripted()
+    dev.add_device("AA:01", "Sensor One")
+    dev.add_device("AA:02", "Gadget")
+    dev.add_service(central.uuid16(0x180D), [scripted.char_spec(central.uuid16(0x2A37), PROP_NOTIFY, nothing()),
+        scripted.char_spec(central.uuid16(0x2A38), PROP_READ, bytes3())])
+    dev
+
+fn opts() -> ConnectOptions
+    central.connect_default()
+
+fn connected(dev: Scripted) -> LinkId [mutate]
+    match dev.connect(central.peer("AA:01"), opts())
+        Ok(l)  => l
+        Err(_) => LinkId { id: 0 - 1 }
+
+// The kinds of the events waiting, in order.
+fn drain(dev: Scripted) -> [Int] [mutate]
+    var out: [Int] = []
+    for _i in 0..100
+        match dev.next_event(0)
+            Some(e) => list.push(out, tag(e))
+            None    =>
+                return out
+    out
+
+fn tag(e: CentralEvent) -> Int
+    match e
+        ScanResult(_, _, _, _) => 2
+        Connected(_, _, _)     => 4
+        Disconnected(_, _)     => 5
+        Discovered(_, _)       => 6
+        ReadDone(_, _, _, _)   => 7
+        WriteDone(_, _, _)     => 8
+        SubscribeDone(_, _, _) => 9
+        MtuChanged(_, _, _)    => 11
+        PriorityChanged(_, _)  => 12
+        _                      => 0
+
+@test
+fn test_a_scan_lists_the_devices_that_match_the_filter() [mutate]
+    let dev = world()
+    test.assert(dev.scan_start(central.scan_all()) == None)
+    test.assert(dev.scanning())
+    test.assert_eq(dev.queued(), 2)
+    dev.scan_stop()
+    test.assert(not dev.scanning())
+    var seen = ""
+    for _i in 0..2
+        match dev.next_event(0)
+            Some(ScanResult(p, rssi, name, _)) =>
+                seen = "${seen}${central.peer_key(p)}:${name}:${rssi};"
+            _                                  => ()
+    test.assert_eq(seen, "AA:01:Sensor One:-60;AA:02:Gadget:-60;")
+
+@test
+fn test_a_filter_by_name_or_by_peer_narrows_the_scan() [mutate]
+    let dev = world()
+    let by_name = ScanFilter { services: [], name_prefix: "Gad", only: None }
+    test.assert(dev.scan_start(by_name) == None)
+    test.assert_eq(dev.queued(), 1)
+    let one = world()
+    let by_peer = ScanFilter { services: [], name_prefix: "", only: Some(central.peer("AA:01")) }
+    test.assert(one.scan_start(by_peer) == None)
+    test.assert_eq(one.queued(), 1)
+
+@test
+fn test_connect_answers_with_a_link_and_an_event() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    test.assert_eq(link.id, 1)
+    test.assert_eq(drain(dev).len(), 1)
+    match dev.connect(central.peer("ZZ"), opts())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_NOT_FOUND)
+
+@test
+fn test_every_operation_is_answered_with_its_event() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    let services = [dev.discover(link) == None]
+    test.assert(services[0])
+    let ch = CharRef { link: link.id, idx: 1 }
+    test.assert(dev.read(link, ch) == None)
+    test.assert(dev.write(link, ch, bytes3(), true) == None)
+    test.assert(dev.subscribe(link, ch, SubMode.Notify) == None)
+    test.assert(dev.request_mtu(link, 185) == None)
+    test.assert(dev.priority(link, Priority.High) == None)
+    dev.disconnect(link)
+    let kinds = drain(dev)
+    test.assert_eq(kinds[0], 4)
+    test.assert_eq(kinds[1], 6)
+    test.assert_eq(kinds[2], 7)
+    test.assert_eq(kinds[3], 8)
+    test.assert_eq(kinds[4], 9)
+    test.assert_eq(kinds[5], 11)
+    test.assert_eq(kinds[6], 12)
+    test.assert_eq(kinds[7], 5)
+    test.assert_eq(dev.priority_asked(), 2)
+
+@test
+fn test_priority_is_remembered_in_the_three_levels() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    test.assert(dev.priority(link, Priority.LowPower) == None)
+    test.assert_eq(dev.priority_asked(), 0)
+    test.assert(dev.priority(link, Priority.Balanced) == None)
+    test.assert_eq(dev.priority_asked(), 1)
+
+@test
+fn test_a_second_disconnect_is_not_reported_twice() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    dev.disconnect(link)
+    dev.disconnect(link)
+    test.assert_eq(drain(dev).len(), 2)
+
+@test
+fn test_an_operation_on_an_ended_link_is_refused() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    dev.disconnect(link)
+    let ch = CharRef { link: link.id, idx: 0 }
+    for r in [dev.discover(link),
+    dev.read(link, ch),
+    dev.write(link, ch, bytes3(), true),
+    dev.subscribe(link, ch, SubMode.Notify),
+    dev.request_mtu(link, 100),
+    dev.priority(link, Priority.High)]
+        match r
+            Some(e) => test.assert_eq(e.code, E_NOT_CONNECTED)
+            None    => test.assert(false)
+
+@test
+fn test_a_bad_characteristic_or_a_write_too_long_is_refused() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    let bad = CharRef { link: link.id, idx: 9 }
+    let neg = CharRef { link: link.id, idx: 0 - 1 }
+    for r in [dev.read(link, bad),
+    dev.read(link, neg),
+    dev.write(link, bad, bytes3(), true),
+    dev.write(link, neg, bytes3(), true)]
+        match r
+            Some(e) => test.assert_eq(e.code, E_BAD_ARGUMENT)
+            None    => test.assert(false)
+    var big: [u8] = []
+    for i in 0..21
+        list.push(big, i as u8)
+    match dev.write(link, CharRef { link: link.id, idx: 0 }, big, false)
+        Some(e) => test.assert_eq(e.code, E_BAD_ARGUMENT)
+        None    => test.assert(false)
+
+@test
+fn test_the_adapter_state_gates_every_call() [mutate]
+    let dev = world()
+    dev.set_adapter(AdapterState.Off)
+    test.assert(dev.adapter() == AdapterState.Off)
+    match dev.scan_start(central.scan_all())
+        Some(e) => test.assert_eq(e.code, E_ADAPTER_OFF)
+        None    => test.assert(false)
+    match dev.connect(central.peer("AA:01"), opts())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, E_ADAPTER_OFF)
+
+@test
+fn test_a_refusal_applies_once_and_a_silence_applies_once() [mutate]
+    let dev = world()
+    dev.refuse("scan_start", 12)
+    dev.refuse("connect", 13)
+    match dev.scan_start(central.scan_all())
+        Some(e) => test.assert_eq(e.code, 12)
+        None    => test.assert(false)
+    test.assert(dev.scan_start(central.scan_all()) == None)
+    match dev.connect(central.peer("AA:01"), opts())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert_eq(e.code, 13)
+    dev.silence("connect")
+    let link = connected(dev)
+    test.assert_eq(link.id, 1)
+    test.assert_eq(drain(dev).len(), 2)
+
+@test
+fn test_the_services_carry_the_link_and_the_index_of_each_characteristic() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    let services = dev.services(link)
+    test.assert_eq(list.len(services), 1)
+    test.assert_eq(services[0].chars[0].ref.idx, 0)
+    test.assert_eq(services[0].chars[1].ref.idx, 1)
+    test.assert_eq(services[0].chars[1].ref.link, link.id)
+    test.assert_eq(list.len(dev.value_of(1)), 3)
+
+@test
+fn test_the_mtu_follows_the_request_up_to_the_limit_and_not_below_23() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    test.assert_eq(dev.max_write(link, true), 20)
+    test.assert(dev.request_mtu(link, 100) == None)
+    test.assert_eq(dev.max_write(link, false), 97)
+    dev.set_mtu_limit(50)
+    test.assert(dev.request_mtu(link, 247) == None)
+    test.assert_eq(dev.max_write(link, false), 47)
+    test.assert(dev.request_mtu(link, 5) == None)
+    test.assert_eq(dev.max_write(link, false), 20)
+    test.assert_eq(dev.caps().max_mtu, 50)
+    test.assert(dev.caps().priority)
+
+@test
+fn test_the_calls_are_recorded_in_order() [mutate]
+    let dev = world()
+    let link = connected(dev)
+    test.assert(dev.discover(link) == None)
+    dev.scan_stop()
+    let calls = dev.calls()
+    test.assert_eq(calls[0], "connect AA:01")
+    test.assert_eq(calls[1], "discover 1")
+    test.assert_eq(calls[2], "scan_stop")
+
+@test
+fn test_next_event_answers_none_when_nothing_waits() [mutate]
+    let dev = world()
+    test.assert(dev.next_event(100) == None)
+    dev.push(Dropped(3))
+    test.assert_eq(dev.queued(), 1)
+
+@test
+fn test_a_second_link_survives_the_end_of_the_first() [mutate]
+    let dev = world()
+    let first = connected(dev)
+    let second = connected(dev)
+    test.assert_eq(second.id, 2)
+    dev.disconnect(first)
+    test.assert(dev.discover(second) == None)
+    match dev.discover(first)
+        Some(e) => test.assert_eq(e.code, E_NOT_CONNECTED)
+        None    => test.assert(false)

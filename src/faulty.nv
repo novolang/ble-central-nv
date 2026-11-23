@@ -1,0 +1,121 @@
+// faulty: a `GattCentral` that forwards to the scripted double and misbehaves where a test asks, so a suite can be shown to find a defect.
+//
+// The knobs: the largest MTU `caps` reports, what `max_write` answers (-1: the double's), whether `services` answers none, whether a read
+// on a link that has ended is accepted, whether it is refused with the wrong code, and whether `Disconnected` is swallowed.
+
+use central
+use scripted
+
+struct Knobs
+    var max_mtu: Int
+    var max_write: Int
+    var hide_services: Bool
+    var accept_dead_read: Bool
+    var wrong_code: Bool
+    var mute_disconnect: Bool
+
+// The scripted double with the defects the knobs switch on.
+pub struct Faulty
+    inner: Scripted
+    k: Knobs
+
+// A faulty double over `inner`, with no defect switched on.
+pub fn faulty(inner: Scripted) -> Faulty
+    Faulty { inner: inner, k: Knobs { max_mtu: 247,
+        max_write: 0 - 1,
+        hide_services: false,
+        accept_dead_read: false,
+        wrong_code: false,
+        mute_disconnect: false } }
+
+impl Faulty
+    fn set_max_mtu(self, v: Int) [mutate]
+        var k = self.k
+        k.max_mtu = v
+
+    fn set_max_write(self, v: Int) [mutate]
+        var k = self.k
+        k.max_write = v
+
+    fn hide_services(self) [mutate]
+        var k = self.k
+        k.hide_services = true
+
+    fn accept_dead_read(self) [mutate]
+        var k = self.k
+        k.accept_dead_read = true
+
+    fn wrong_code(self) [mutate]
+        var k = self.k
+        k.wrong_code = true
+
+    fn mute_disconnect(self) [mutate]
+        var k = self.k
+        k.mute_disconnect = true
+
+impl GattCentral[mutate] for Faulty
+    fn caps(self) -> Caps
+        let c = self.inner.caps()
+        Caps { priority: c.priority,
+            bonding: c.bonding,
+            phy_2m: c.phy_2m,
+            background: c.background,
+            max_mtu: self.k.max_mtu }
+
+    fn adapter(self) -> AdapterState [mutate]
+        self.inner.adapter()
+
+    fn scan_start(self, filter: ScanFilter) -> ?BleError [mutate]
+        self.inner.scan_start(filter)
+
+    fn scan_stop(self) [mutate]
+        self.inner.scan_stop()
+
+    fn connect(self, p: PeerId, opts: ConnectOptions) -> Result<LinkId, BleError> [mutate]
+        self.inner.connect(p, opts)
+
+    fn disconnect(self, link: LinkId) [mutate]
+        self.inner.disconnect(link)
+
+    fn discover(self, link: LinkId) -> ?BleError [mutate]
+        self.inner.discover(link)
+
+    fn services(self, link: LinkId) -> [ServiceInfo]
+        if self.k.hide_services
+            return []
+        self.inner.services(link)
+
+    fn read(self, link: LinkId, ch: CharRef) -> ?BleError [mutate]
+        match self.inner.read(link, ch)
+            Some(x) =>
+                if self.k.accept_dead_read and x.code == E_NOT_CONNECTED
+                    return None
+                if self.k.wrong_code and x.code == E_NOT_CONNECTED
+                    return Some(central.error(E_BUSY, "busy"))
+                Some(x)
+            None    => None
+
+    fn write(self, link: LinkId, ch: CharRef, data: [u8], ack: Bool) -> ?BleError [mutate]
+        self.inner.write(link, ch, data, ack)
+
+    fn subscribe(self, link: LinkId, ch: CharRef, mode: SubMode) -> ?BleError [mutate]
+        self.inner.subscribe(link, ch, mode)
+
+    fn request_mtu(self, link: LinkId, mtu: Int) -> ?BleError [mutate]
+        self.inner.request_mtu(link, mtu)
+
+    fn max_write(self, link: LinkId, ack: Bool) -> Int
+        if self.k.max_write >= 0
+            return self.k.max_write
+        self.inner.max_write(link, ack)
+
+    fn priority(self, link: LinkId, p: Priority) -> ?BleError [mutate]
+        self.inner.priority(link, p)
+
+    fn next_event(self, timeout_ms: Int) -> ?CentralEvent [mutate]
+        match self.inner.next_event(timeout_ms)
+            Some(Disconnected(l, r)) =>
+                if self.k.mute_disconnect
+                    return self.inner.next_event(timeout_ms)
+                Some(Disconnected(l, r))
+            other                    => other

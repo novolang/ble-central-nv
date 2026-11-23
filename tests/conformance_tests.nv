@@ -7,6 +7,7 @@ use central
 use conformance
 use faulty
 use scripted
+use session
 
 fn bytes3() -> [u8]
     let v: [u8] = [1, 2, 3]
@@ -168,3 +169,30 @@ fn test_the_faulty_double_forwards_scans() [mutate]
     test.assert(dev.inner.scanning())
     dev.scan_stop()
     test.assert(not dev.inner.scanning())
+
+@test
+fn test_a_plan_is_made_from_what_a_device_offers() [mutate, time]
+    let dev = world()
+    let p = session.pump()
+    match session.open_link(dev, p, sensor(), central.connect_default(), 23)
+        Err(_)   => test.assert(false)
+        Ok(link) =>
+            match conformance.plan_from(dev.services(link))
+                None       => test.assert(false)
+                Some(plan) =>
+                    test.assert(central.uuid_eq(plan.service, central.uuid16(0x180D)))
+                    test.assert(central.uuid_eq(plan.read_char, central.uuid16(0x2A38)))
+                    test.assert(plan.write_char == None)
+                    match plan.notify_char
+                        Some(u) => test.assert(central.uuid_eq(u, central.uuid16(0x2A37)))
+                        None    => test.assert(false)
+                    test.assert_eq(list.len(conformance.run(dev, sensor(), plan, 1000)), 0)
+
+@test
+fn test_a_device_with_nothing_to_read_has_no_plan() [mutate]
+    let bare = scripted.scripted()
+    bare.add_service(central.uuid16(0x180D), [scripted.char_spec(central.uuid16(0x2A37), PROP_NOTIFY, nothing())])
+    bare.add_device("AA:01", "Sensor")
+    let link = LinkId { id: 1 }
+    test.assert(conformance.plan_from(bare.services(link)) == None)
+    test.assert(conformance.plan_from([]) == None)

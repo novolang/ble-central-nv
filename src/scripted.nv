@@ -18,7 +18,7 @@
 use central
 
 // A device in range.
-struct Device
+struct Advertiser
     key: Str
     name: Str
 
@@ -36,7 +36,7 @@ struct ServiceSpec
 
 // What the double keeps.  A struct is a reference, so the methods of `Scripted`, whose receiver is by value, reach it through a local `var`.
 struct World
-    var devices: [Device]
+    var devices: [Advertiser]
     var services: [ServiceSpec]
     var chars: [CharSpec]
     var queue: [CentralEvent]
@@ -71,7 +71,7 @@ impl Scripted
     // A device that advertises, by the key a program will know it by.
     fn add_device(self, key: Str, name: Str) [mutate]
         var w = self.w
-        list.push(w.devices, Device { key: key, name: name })
+        list.push(w.devices, Advertiser { key: key, name: name })
 
     // A service on every device.
     fn add_service(self, uuid: Uuid, chars: [CharSpec]) [mutate]
@@ -180,7 +180,7 @@ fn precheck(w: World, op: Str, link: LinkId, needs_link: Bool) -> ?BleError [mut
         return Some(central.error(E_NOT_CONNECTED, "${op} on a link that is not connected"))
     None
 
-fn matches(d: Device, f: ScanFilter) -> Bool
+fn matches(d: Advertiser, f: ScanFilter) -> Bool
     match f.only
         Some(p) =>
             if p.key != d.key

@@ -95,3 +95,22 @@ pub fn run<C: GattCentral[e]>(c: C, peer: PeerId, plan: Plan, ms: Int) -> [Str] 
                             "a read on an ended link was refused with ${x.code} and not E_NOT_CONNECTED")
                 None    => list.push(failed, "a read on an ended link was accepted")
     failed
+
+// A plan from what a device offers, for a device the caller does not know: the first service with a readable characteristic, that
+// characteristic as the one to read, and the first characteristic of the same service that notifies.  Nothing is written.  None when no service
+// has a readable characteristic.
+pub fn plan_from(services: [ServiceInfo]) -> ?Plan
+    for s in services
+        for c in s.chars
+            if (c.props & PROP_READ) != 0
+                var notify: ?Uuid = None
+                for n in s.chars
+                    if (n.props & PROP_NOTIFY) != 0
+                        notify = Some(n.uuid)
+                        break
+                return Some(Plan { service: s.uuid,
+                    read_char: c.uuid,
+                    write_char: None,
+                    write_value: [],
+                    notify_char: notify })
+    None

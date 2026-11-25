@@ -17,16 +17,19 @@ pub struct Uuid
     b: [u8]
 
 // The Bluetooth base UUID is 0000xxxx-0000-1000-8000-00805F9B34FB; a 16-bit UUID is `xxxx`.
-pub fn uuid16(v: Int) -> Uuid
+pub @tier(app)
+fn uuid16(v: Int) -> Uuid
     let base: [u8] = [0, 0, ((v >> 8) & 255) as u8, (v & 255) as u8, 0, 0, 16, 0, 128, 0, 0, 128, 95, 155, 52, 251]
     Uuid { b: base }
 
 // A UUID from 16 octets; None when the list is not 16 long.
-pub fn uuid_from_bytes(b: [u8]) -> ?Uuid
+pub @tier(app)
+fn uuid_from_bytes(b: [u8]) -> ?Uuid
     if list.len(b) != 16
         return None
     Some(Uuid { b: b })
 
+@tier(app)
 fn hex_value(c: Int) -> Int
     if c >= 48 and c <= 57
         return c - 48
@@ -37,7 +40,8 @@ fn hex_value(c: Int) -> Int
     0 - 1
 
 // A UUID from its text: 4 hexadecimal digits (16 bits), 8 (32 bits) or the 36 characters with dashes.  None for anything else.
-pub fn uuid_from_text(s: Str) -> ?Uuid
+pub @tier(app)
+fn uuid_from_text(s: Str) -> ?Uuid
     var digits: [Int] = []
     let n = str.len(s)
     for i in 0..n
@@ -80,11 +84,13 @@ pub fn uuid_from_text(s: Str) -> ?Uuid
         list.push(out, (digits[2 * i] * 16 + digits[2 * i + 1]) as u8)
     Some(Uuid { b: out })
 
+@tier(app)
 fn hex_digit(v: Int) -> Str
     str.slice("0123456789abcdef", v, v + 1)
 
 // The 36 characters of a UUID, lower case.
-pub fn uuid_text(u: Uuid) -> Str
+pub @tier(app)
+fn uuid_text(u: Uuid) -> Str
     var out = ""
     for i in 0..16
         if i == 4 or i == 6 or i == 8 or i == 10
@@ -94,7 +100,8 @@ pub fn uuid_text(u: Uuid) -> Str
     out
 
 // Whether two UUIDs are the same.
-pub fn uuid_eq(a: Uuid, b: Uuid) -> Bool
+pub @tier(app)
+fn uuid_eq(a: Uuid, b: Uuid) -> Bool
     for i in 0..16
         if a.b[i] != b.b[i]
             return false
@@ -107,15 +114,18 @@ pub struct PeerId
     key: Str
 
 // The peer for a key an implementation made earlier.
-pub fn peer(key: Str) -> PeerId
+pub @tier(app)
+fn peer(key: Str) -> PeerId
     PeerId { key: key }
 
 // The key to keep.
-pub fn peer_key(p: PeerId) -> Str
+pub @tier(app)
+fn peer_key(p: PeerId) -> Str
     p.key
 
 // Whether two peers are the same device.
-pub fn peer_eq(a: PeerId, b: PeerId) -> Bool
+pub @tier(app)
+fn peer_eq(a: PeerId, b: PeerId) -> Bool
     a.key == b.key
 
 // A connection, from `Connected` to `Disconnected`.
@@ -192,11 +202,13 @@ pub struct ScanFilter
     only: ?PeerId
 
 // A filter that matches every advertiser.
-pub fn scan_all() -> ScanFilter
+pub @tier(app)
+fn scan_all() -> ScanFilter
     ScanFilter { services: [], name_prefix: "", only: None }
 
 // A filter for one service.
-pub fn scan_service(u: Uuid) -> ScanFilter
+pub @tier(app)
+fn scan_service(u: Uuid) -> ScanFilter
     ScanFilter { services: [u], name_prefix: "", only: None }
 
 // How a connection is made: the time allowed and the security level asked for.
@@ -205,7 +217,8 @@ pub struct ConnectOptions
     security: Security
 
 // Ten seconds, no security asked.
-pub fn connect_default() -> ConnectOptions
+pub @tier(app)
+fn connect_default() -> ConnectOptions
     ConnectOptions { timeout_ms: 10000, security: Security.Unsecured }
 
 // The codes of `BleError`.  A code of 1000 or more is the platform's own GATT status, 1000 added.
@@ -233,10 +246,12 @@ pub struct BleError
     text: Str
 
 // An error with a code and a sentence.
-pub fn error(code: Int, text: Str) -> BleError
+pub @tier(app)
+fn error(code: Int, text: Str) -> BleError
     BleError { code: code, text: text }
 
 impl Error for BleError
+    @tier(app)
     fn message(self) -> Str
         "${self.text} (${self.code})"
 

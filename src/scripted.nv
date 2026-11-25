@@ -58,22 +58,26 @@ pub struct Scripted
     w: World
 
 // A double with no device, the adapter on, an MTU of 23 that the peer lets rise to 247.
-pub fn scripted() -> Scripted
+pub @tier(app)
+fn scripted() -> Scripted
     Scripted { w: World { devices: [], services: [], chars: [], queue: [], calls: [], links: [], next_link: 1,
                           refused: [], refused_code: [], silent: [], adapter: AdapterState.On, scanning: false,
                           mtu: 23, mtu_limit: 247, priority: 0, subs: [] } }
 
 // A characteristic for `add_service`.
-pub fn char_spec(uuid: Uuid, props: Int, value: [u8]) -> CharSpec
+pub @tier(app)
+fn char_spec(uuid: Uuid, props: Int, value: [u8]) -> CharSpec
     CharSpec { uuid: uuid, props: props, value: value[:] }
 
 impl Scripted
     // A device that advertises, by the key a program will know it by.
+    @tier(app)
     fn add_device(self, key: Str, name: Str) [mutate]
         var w = self.w
         list.push(w.devices, Advertiser { key: key, name: name })
 
     // A service on every device.
+    @tier(app)
     fn add_service(self, uuid: Uuid, chars: [CharSpec]) [mutate]
         var w = self.w
         list.push(w.services, ServiceSpec { uuid: uuid, first: list.len(w.chars), count: list.len(chars) })
@@ -81,40 +85,48 @@ impl Scripted
             list.push(w.chars, c)
 
     // Queues an event the peripheral makes on its own.
+    @tier(app)
     fn push(self, e: CentralEvent) [mutate]
         var w = self.w
         list.push(w.queue, e)
 
     // The next call named `op` is refused with `code`.
+    @tier(app)
     fn refuse(self, op: Str, code: Int) [mutate]
         var w = self.w
         list.push(w.refused, op)
         list.push(w.refused_code, code)
 
     // The next call named `op` is accepted and never answered.
+    @tier(app)
     fn silence(self, op: Str) [mutate]
         var w = self.w
         list.push(w.silent, op)
 
     // The state of the adapter.
+    @tier(app)
     fn set_adapter(self, state: AdapterState) [mutate]
         var w = self.w
         w.adapter = state
 
     // The largest MTU the peer accepts.
+    @tier(app)
     fn set_mtu_limit(self, mtu: Int) [mutate]
         var w = self.w
         w.mtu_limit = mtu
 
     // The calls so far, one text each: the operation and its arguments.
+    @tier(app)
     fn calls(self) -> [Str]
         self.w.calls[:]
 
     // The value of the characteristic with the index.
+    @tier(app)
     fn value_of(self, idx: Int) -> [u8]
         self.w.chars[idx].value[:]
 
     // The subscription mode last set on the characteristic with the index: 0 off, 1 notify, 2 indicate.
+    @tier(app)
     fn sub_of(self, idx: Int) -> Int
         let w = self.w
         if idx < list.len(w.subs)
@@ -122,18 +134,22 @@ impl Scripted
         0
 
     // The priority last asked for: 0 low power, 1 balanced, 2 high.
+    @tier(app)
     fn priority_asked(self) -> Int
         self.w.priority
 
     // Whether a scan is running.
+    @tier(app)
     fn scanning(self) -> Bool
         self.w.scanning
 
     // The number of events waiting.
+    @tier(app)
     fn queued(self) -> Int
         list.len(self.w.queue)
 
 // Whether `op` is to be refused now; the code, or 0.
+@tier(app)
 fn refusal(w: World, op: Str) -> Int [mutate]
     var ww = w
     for i in 0..list.len(ww.refused)
@@ -151,6 +167,7 @@ fn refusal(w: World, op: Str) -> Int [mutate]
     0
 
 // Whether `op` is to go unanswered now.
+@tier(app)
 fn silenced(w: World, op: Str) -> Bool [mutate]
     var ww = w
     for i in 0..list.len(ww.silent)
@@ -163,6 +180,7 @@ fn silenced(w: World, op: Str) -> Bool [mutate]
             return true
     false
 
+@tier(app)
 fn linked(w: World, link: LinkId) -> Bool
     for l in w.links
         if l == link.id
@@ -170,6 +188,7 @@ fn linked(w: World, link: LinkId) -> Bool
     false
 
 // What every call checks first: a refusal the test set, the link, the adapter.
+@tier(app)
 fn precheck(w: World, op: Str, link: LinkId, needs_link: Bool) -> ?BleError [mutate]
     let code = refusal(w, op)
     if code != 0
@@ -180,6 +199,7 @@ fn precheck(w: World, op: Str, link: LinkId, needs_link: Bool) -> ?BleError [mut
         return Some(central.error(E_NOT_CONNECTED, "${op} on a link that is not connected"))
     None
 
+@tier(app)
 fn matches(d: Advertiser, f: ScanFilter) -> Bool
     match f.only
         Some(p) =>
@@ -191,6 +211,7 @@ fn matches(d: Advertiser, f: ScanFilter) -> Bool
     true
 
 impl GattCentral[mutate] for Scripted
+    @tier(app)
     fn caps(self) -> Caps
         Caps { priority: true,
             bonding: false,
@@ -198,9 +219,11 @@ impl GattCentral[mutate] for Scripted
             background: false,
             max_mtu: self.w.mtu_limit }
 
+    @tier(app)
     fn adapter(self) -> AdapterState [mutate]
         self.w.adapter
 
+    @tier(app)
     fn scan_start(self, filter: ScanFilter) -> ?BleError [mutate]
         var w = self.w
         list.push(w.calls, "scan_start")
@@ -214,11 +237,13 @@ impl GattCentral[mutate] for Scripted
                 list.push(w.queue, ScanResult(PeerId { key: d.key }, 0 - 60, d.name, []))
         None
 
+    @tier(app)
     fn scan_stop(self) [mutate]
         var w = self.w
         list.push(w.calls, "scan_stop")
         w.scanning = false
 
+    @tier(app)
     fn connect(self, p: PeerId, opts: ConnectOptions) -> Result<LinkId, BleError> [mutate]
         var w = self.w
         list.push(w.calls, "connect ${p.key}")
@@ -239,6 +264,7 @@ impl GattCentral[mutate] for Scripted
             list.push(w.queue, Connected(link, p, 0))
         Ok(link)
 
+    @tier(app)
     fn disconnect(self, link: LinkId) [mutate]
         var w = self.w
         list.push(w.calls, "disconnect ${link.id}")
@@ -251,6 +277,7 @@ impl GattCentral[mutate] for Scripted
         w.links = rest
         list.push(w.queue, Disconnected(link, 0))
 
+    @tier(app)
     fn discover(self, link: LinkId) -> ?BleError [mutate]
         var w = self.w
         list.push(w.calls, "discover ${link.id}")
@@ -262,6 +289,7 @@ impl GattCentral[mutate] for Scripted
             list.push(w.queue, Discovered(link, 0))
         None
 
+    @tier(app)
     fn services(self, link: LinkId) -> [ServiceInfo]
         let w = self.w
         var out: [ServiceInfo] = []
@@ -275,6 +303,7 @@ impl GattCentral[mutate] for Scripted
             list.push(out, ServiceInfo { uuid: s.uuid, chars: chars })
         out
 
+    @tier(app)
     fn read(self, link: LinkId, ch: CharRef) -> ?BleError [mutate]
         var w = self.w
         list.push(w.calls, "read ${ch.idx}")
@@ -288,6 +317,7 @@ impl GattCentral[mutate] for Scripted
             list.push(w.queue, ReadDone(link, ch, 0, w.chars[ch.idx].value))
         None
 
+    @tier(app)
     fn write(self, link: LinkId, ch: CharRef, data: [u8], ack: Bool) -> ?BleError [mutate]
         var w = self.w
         list.push(w.calls, "write ${ch.idx} ${list.len(data)} ${ack}")
@@ -304,6 +334,7 @@ impl GattCentral[mutate] for Scripted
             list.push(w.queue, WriteDone(link, ch, 0))
         None
 
+    @tier(app)
     fn subscribe(self, link: LinkId, ch: CharRef, mode: SubMode) -> ?BleError [mutate]
         var w = self.w
         list.push(w.calls, "subscribe ${ch.idx}")
@@ -322,6 +353,7 @@ impl GattCentral[mutate] for Scripted
             list.push(w.queue, SubscribeDone(link, ch, 0))
         None
 
+    @tier(app)
     fn request_mtu(self, link: LinkId, mtu: Int) -> ?BleError [mutate]
         var w = self.w
         list.push(w.calls, "request_mtu ${mtu}")
@@ -339,9 +371,11 @@ impl GattCentral[mutate] for Scripted
             list.push(w.queue, MtuChanged(link, w.mtu, 0))
         None
 
+    @tier(app)
     fn max_write(self, link: LinkId, ack: Bool) -> Int
         self.w.mtu - 3
 
+    @tier(app)
     fn priority(self, link: LinkId, p: Priority) -> ?BleError [mutate]
         var w = self.w
         list.push(w.calls, "priority")
@@ -357,6 +391,7 @@ impl GattCentral[mutate] for Scripted
             list.push(w.queue, PriorityChanged(link, 0))
         None
 
+    @tier(app)
     fn next_event(self, timeout_ms: Int) -> ?CentralEvent [mutate]
         var w = self.w
         if list.len(w.queue) == 0

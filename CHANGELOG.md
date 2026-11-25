@@ -2,6 +2,12 @@
 
 Every published version, newest first.  This file is on the publish allow-list, so it travels with the package.
 
+## 0.1.1
+
+- The functions of the trait package are declared `@tier(app)`, which is what they are: they allocate (a `Uuid`, an event, a string of text) and the host and phone packages use
+  `std` freely.  A function with no `@tier` is checked at the tier of the project that holds the package, so an embedded-tier project that held 0.1.0, as
+  `orbit/noble-examples` does through `smp-client-nv`, failed its build with E4000 on functions it never calls.  No signature and no behaviour changed.
+
 ## 0.1.0
 
 First release.

@@ -24,7 +24,8 @@ pub struct Plan
     notify_char: ?Uuid
 
 // Runs the checks; the text of every one that failed, none when all passed.
-pub fn run<C: GattCentral[e]>(c: C, peer: PeerId, plan: Plan, ms: Int) -> [Str] [e, mutate, time]
+pub @tier(app)
+fn run<C: GattCentral[e]>(c: C, peer: PeerId, plan: Plan, ms: Int) -> [Str] [e, mutate, time]
     var failed: [Str] = []
     let p = session.pump()
     if c.adapter() != AdapterState.On
@@ -99,7 +100,8 @@ pub fn run<C: GattCentral[e]>(c: C, peer: PeerId, plan: Plan, ms: Int) -> [Str] 
 // A plan from what a device offers, for a device the caller does not know: the first service with a readable characteristic, that
 // characteristic as the one to read, and the first characteristic of the same service that notifies.  Nothing is written.  None when no service
 // has a readable characteristic.
-pub fn plan_from(services: [ServiceInfo]) -> ?Plan
+pub @tier(app)
+fn plan_from(services: [ServiceInfo]) -> ?Plan
     for s in services
         for c in s.chars
             if (c.props & PROP_READ) != 0

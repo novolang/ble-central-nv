@@ -20,7 +20,8 @@ pub struct Faulty
     k: Knobs
 
 // A faulty double over `inner`, with no defect switched on.
-pub fn faulty(inner: Scripted) -> Faulty
+pub @tier(app)
+fn faulty(inner: Scripted) -> Faulty
     Faulty { inner: inner, k: Knobs { max_mtu: 247,
         max_write: 0 - 1,
         hide_services: false,
@@ -29,31 +30,38 @@ pub fn faulty(inner: Scripted) -> Faulty
         mute_disconnect: false } }
 
 impl Faulty
+    @tier(app)
     fn set_max_mtu(self, v: Int) [mutate]
         var k = self.k
         k.max_mtu = v
 
+    @tier(app)
     fn set_max_write(self, v: Int) [mutate]
         var k = self.k
         k.max_write = v
 
+    @tier(app)
     fn hide_services(self) [mutate]
         var k = self.k
         k.hide_services = true
 
+    @tier(app)
     fn accept_dead_read(self) [mutate]
         var k = self.k
         k.accept_dead_read = true
 
+    @tier(app)
     fn wrong_code(self) [mutate]
         var k = self.k
         k.wrong_code = true
 
+    @tier(app)
     fn mute_disconnect(self) [mutate]
         var k = self.k
         k.mute_disconnect = true
 
 impl GattCentral[mutate] for Faulty
+    @tier(app)
     fn caps(self) -> Caps
         let c = self.inner.caps()
         Caps { priority: c.priority,
@@ -62,29 +70,37 @@ impl GattCentral[mutate] for Faulty
             background: c.background,
             max_mtu: self.k.max_mtu }
 
+    @tier(app)
     fn adapter(self) -> AdapterState [mutate]
         self.inner.adapter()
 
+    @tier(app)
     fn scan_start(self, filter: ScanFilter) -> ?BleError [mutate]
         self.inner.scan_start(filter)
 
+    @tier(app)
     fn scan_stop(self) [mutate]
         self.inner.scan_stop()
 
+    @tier(app)
     fn connect(self, p: PeerId, opts: ConnectOptions) -> Result<LinkId, BleError> [mutate]
         self.inner.connect(p, opts)
 
+    @tier(app)
     fn disconnect(self, link: LinkId) [mutate]
         self.inner.disconnect(link)
 
+    @tier(app)
     fn discover(self, link: LinkId) -> ?BleError [mutate]
         self.inner.discover(link)
 
+    @tier(app)
     fn services(self, link: LinkId) -> [ServiceInfo]
         if self.k.hide_services
             return []
         self.inner.services(link)
 
+    @tier(app)
     fn read(self, link: LinkId, ch: CharRef) -> ?BleError [mutate]
         match self.inner.read(link, ch)
             Some(x) =>
@@ -95,23 +111,29 @@ impl GattCentral[mutate] for Faulty
                 Some(x)
             None    => None
 
+    @tier(app)
     fn write(self, link: LinkId, ch: CharRef, data: [u8], ack: Bool) -> ?BleError [mutate]
         self.inner.write(link, ch, data, ack)
 
+    @tier(app)
     fn subscribe(self, link: LinkId, ch: CharRef, mode: SubMode) -> ?BleError [mutate]
         self.inner.subscribe(link, ch, mode)
 
+    @tier(app)
     fn request_mtu(self, link: LinkId, mtu: Int) -> ?BleError [mutate]
         self.inner.request_mtu(link, mtu)
 
+    @tier(app)
     fn max_write(self, link: LinkId, ack: Bool) -> Int
         if self.k.max_write >= 0
             return self.k.max_write
         self.inner.max_write(link, ack)
 
+    @tier(app)
     fn priority(self, link: LinkId, p: Priority) -> ?BleError [mutate]
         self.inner.priority(link, p)
 
+    @tier(app)
     fn next_event(self, timeout_ms: Int) -> ?CentralEvent [mutate]
         match self.inner.next_event(timeout_ms)
             Some(Disconnected(l, r)) =>

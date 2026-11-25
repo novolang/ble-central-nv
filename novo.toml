@@ -1,6 +1,6 @@
 [package]
 name        = "ble-central-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "The Central role of Bluetooth LE at the level of GATT operations, as a trait with an event stream: scan, connect, discover, read, write, subscribe, a maximum write length and advisory connection parameters, over an opaque peer id, with the session helpers every service client shares, a scripted implementation that models a peripheral, and a conformance suite any implementation runs.  Holds no stack: a phone's operating system, the noble Host and a test double are the implementations."
 license     = "Apache-2.0"
 stability   = "experimental"
